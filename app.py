@@ -1118,6 +1118,10 @@ def main():
     with st.sidebar:
         st.divider()
         st.caption("Data: FMP · tastytrade · Anthropic Claude")
+        # Marcador de build: en Render muestra el SHA desplegado (RENDER_GIT_COMMIT),
+        # en local muestra "local". Sirve para verificar qué commit está vivo.
+        _build = os.getenv("RENDER_GIT_COMMIT", "")[:7] or "local"
+        st.caption(f"build · {_build}")
 
 
 if __name__ == "__main__":
