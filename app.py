@@ -88,7 +88,10 @@ STRIPE_PAYMENT_LINK = "https://buy.stripe.com/eVq3cx1Isbd74qLd6BcfK01"
 # CACHES — Densidades
 # ─────────────────────────────────────────────
 @st.cache_data
-def cached_quotes(ticker: str, range_code: str, fmp_api_key: str):
+def cached_quotes(ticker: str, range_code: str, fmp_api_key: str, cache_day: str):
+    # cache_day (YYYY-MM-DD) es parte de la clave de caché para forzar un refetch
+    # diario. Sin él, un proceso de larga vida (Render) sirve el histórico congelado
+    # al día en que se llenó la caché. No se usa dentro de la función.
     range_to_days = {
         "d1": 1, "d5": 5, "m1": 21, "m3": 63, "m6": 126,
         "ytd": 252, "y1": 252, "y2": 504, "y5": 1260, "max": 0,
@@ -557,7 +560,9 @@ def render_densidades(ticker: str):
     st.caption("Data: tastytrade (options · real-time) · FMP (historical OHLCV)")
 
     try:
-        quotes_df = cached_quotes(ticker, range_code, fmp_api_key)
+        quotes_df = cached_quotes(
+            ticker, range_code, fmp_api_key, datetime.now().date().isoformat()
+        )
     except RuntimeError as e:
         st.error(f"Could not download historical data from FMP: {e}")
         st.stop()
