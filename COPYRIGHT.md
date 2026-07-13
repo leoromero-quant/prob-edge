@@ -3,7 +3,7 @@
 **Project:** Prob-Edge — Risk-Neutral Density SaaS for Options Markets
 **Repository:** `github.com/leoromero-quant/prob-edge`
 **Author and sole copyright holder:** Leonardo Suárez Romero, PhD
-**Email:** leonardosuarezromero@gmail.com
+**Email:** leonardo@leoromero.dev
 **Public profile:** [leoromero.dev](https://leoromero.dev) · [LinkedIn](https://linkedin.com/in/leonardo-suarez-romero)
 **Effective date of this declaration:** 22 May 2026
 **Repository state at declaration:** commit `8dbc85a` on branch `main`
