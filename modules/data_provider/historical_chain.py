@@ -218,6 +218,7 @@ def fetch_historical_chain(
     q_annual: float = 0.0,
     moneyness_low: float = 0.5,
     moneyness_high: float = 1.6,
+    price_field: str = "c",
 ) -> pd.DataFrame:
     """
     (ticker, expiry, as_of_date) -> normalized historical chain DataFrame.
@@ -225,6 +226,9 @@ def fetch_historical_chain(
     `spot` (the as-of close from fetch_quote_history) is required: it defines the
     moneyness filter applied BEFORE pulling per-contract aggregates, cutting the
     call count from all strikes to the near-money set, and anchors BS inversion.
+
+    `price_field` = "c" (daily close) by default, temporally aligned with the EOD
+    spot; "vw" (day VWAP) is a robustness alternative but mismatches the EOD spot.
     """
     if spot is None or not np.isfinite(spot) or spot <= 0:
         raise ValueError("fetch_historical_chain requires a positive `spot` (as-of close).")
@@ -241,4 +245,5 @@ def fetch_historical_chain(
         near, closes, spot=spot, expiry=expiry, as_of=as_of_date,
         r_annual=r_annual, q_annual=q_annual,
         moneyness_low=moneyness_low, moneyness_high=moneyness_high,
+        price_field=price_field,
     )
