@@ -3,6 +3,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from modules.utils import cdf_quantiles
+
+# Niveles de confianza del cono: 95% (2.5/97.5), 68% (16/84) y mediana.
+_BAND_LEVELS = (0.025, 0.16, 0.50, 0.84, 0.975)
+
 
 def compute_quantile_bands(price_grid: np.ndarray, density: np.ndarray):
     """
@@ -15,7 +20,6 @@ def compute_quantile_bands(price_grid: np.ndarray, density: np.ndarray):
     if n_p < 2 or n_t < 1:
         return None, None, None, None, None
 
-    dx = price_grid[1] - price_grid[0]
     q2p5 = np.full(n_t, np.nan)
     q16 = np.full(n_t, np.nan)
     q50 = np.full(n_t, np.nan)
@@ -23,28 +27,9 @@ def compute_quantile_bands(price_grid: np.ndarray, density: np.ndarray):
     q97p5 = np.full(n_t, np.nan)
 
     for j in range(n_t):
-        pdf = density[:, j]
-        if not np.isfinite(pdf).any():
-            continue
-        if pdf.sum() <= 0:
-            continue
-
-        pdf = np.clip(pdf, 0, None)
-        cdf = np.cumsum(pdf) * dx
-        if cdf[-1] <= 0:
-            continue
-        cdf /= cdf[-1]
-
-        def q_level(level: float):
-            idx = np.searchsorted(cdf, level)
-            idx = min(max(idx, 0), len(price_grid) - 1)
-            return price_grid[idx]
-
-        q2p5[j] = q_level(0.025)
-        q16[j] = q_level(0.16)
-        q50[j] = q_level(0.50)
-        q84[j] = q_level(0.84)
-        q97p5[j] = q_level(0.975)
+        q2p5[j], q16[j], q50[j], q84[j], q97p5[j] = cdf_quantiles(
+            price_grid, density[:, j], _BAND_LEVELS
+        )
 
     return q2p5, q16, q50, q84, q97p5
 

@@ -20,6 +20,48 @@ def gaussian_density(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
 
 
 # -------------------------------------------------
+# 1b. CDF / cuantiles a partir de una densidad discreta
+#     (helper único; antes duplicado en plots.py y app.py)
+# -------------------------------------------------
+def normalized_cdf(K_grid: np.ndarray, pdf: np.ndarray) -> np.ndarray | None:
+    """
+    CDF monótona en [0, 1] sobre K_grid a partir de una pdf discreta.
+
+    Limpia NaN/negativos, integra por cumsum y normaliza al total. El paso dx
+    se cancela al dividir por el total, así que no se necesita grid uniforme
+    para los cuantiles/PoP (mismos resultados que cumsum*dx/cdf[-1]).
+
+    Devuelve None si la densidad es degenerada (masa total <= 0).
+    """
+    p = np.clip(np.nan_to_num(np.asarray(pdf, dtype=float)), 0.0, None)
+    if p.size < 2:
+        return None
+    cdf = np.cumsum(p)
+    if not np.isfinite(cdf[-1]) or cdf[-1] <= 0:
+        return None
+    return cdf / cdf[-1]
+
+
+def cdf_quantiles(K_grid: np.ndarray, pdf: np.ndarray, levels) -> np.ndarray:
+    """
+    Precio(s) del K_grid donde la CDF cruza cada nivel (inversa de la CDF por
+    searchsorted, misma semántica que los tres bloques que reemplaza).
+
+    `levels` escalar o array-like en [0, 1]. Devuelve un array del mismo largo
+    que `levels` (o escalar-en-array de tamaño 1). Devuelve NaN por nivel si la
+    densidad es degenerada.
+    """
+    K = np.asarray(K_grid, dtype=float)
+    levels_arr = np.atleast_1d(np.asarray(levels, dtype=float))
+    cdf = normalized_cdf(K, pdf)
+    if cdf is None:
+        return np.full(levels_arr.shape, np.nan)
+    idx = np.searchsorted(cdf, levels_arr)
+    idx = np.clip(idx, 0, K.size - 1)
+    return K[idx]
+
+
+# -------------------------------------------------
 # 2. Construcción de ejes y matriz de densidad
 # -------------------------------------------------
 def build_price_axis(
@@ -262,7 +304,9 @@ def build_clean_calls_from_chain(
     Devuelve columnas:
     ['strike', 'call_price_clean']
     """
-    T_years = (expiry_date - valuation_date).days / 365.0
+    # 365.25 para alinear con compute_rnd_from_calls / compute_rnd_from_clean_calls
+    # (antes 365.0 aquí): la misma T anualizada en toda la cadena de descuento.
+    T_years = (expiry_date - valuation_date).days / 365.25
     T_years = max(T_years, 1e-6)
 
     df = options_df.copy()
@@ -588,3 +632,58 @@ def compute_rnd_from_clean_calls(
         return K_scaled, pdf_scaled
 
     return K_grid, pdf
+
+
+# -------------------------------------------------
+# 5. Registro de productores de densidad (seleccionable por `method`)
+#     Contrato uniforme: (options_df, spot, valuation_date, expiry_date,
+#     r_annual, q_annual, ...) -> (K_grid, pdf_K). El productor decide cómo
+#     limpiar la cadena. Phase G añadirá "corrected" con el mismo contrato.
+# -------------------------------------------------
+def _bl_producer(
+    options_df: pd.DataFrame,
+    spot: float,
+    valuation_date: pd.Timestamp,
+    expiry_date: pd.Timestamp,
+    r_annual: float,
+    q_annual: float = 0.0,
+    n_grid: int = 400,
+    **_ignore,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Breeden-Litzenberger vanilla: limpia la cadena por paridad put-call y usa
+    compute_rnd_from_clean_calls; si la limpieza no deja calls, cae al extractor
+    de calls crudos. Es exactamente la lógica que antes vivía inline en app.py.
+    """
+    clean_calls = build_clean_calls_from_chain(
+        options_df, S0=spot, valuation_date=valuation_date,
+        expiry_date=expiry_date, r_annual=r_annual, q_annual=q_annual,
+    )
+    if not clean_calls.empty:
+        return compute_rnd_from_clean_calls(
+            clean_calls, spot=spot, valuation_date=valuation_date,
+            expiry_date=expiry_date, r_annual=r_annual, q_annual=q_annual, n_grid=n_grid,
+        )
+    return compute_rnd_from_calls(
+        options_df, spot=spot, valuation_date=valuation_date,
+        expiry_date=expiry_date, r_annual=r_annual, q_annual=q_annual, n_grid=n_grid,
+    )
+
+
+# Registro método -> productor. "bl_raw" preserva el comportamiento actual de la
+# API (calls crudos, sin limpieza de paridad). Phase G: DENSITY_PRODUCERS["corrected"].
+DENSITY_PRODUCERS = {
+    "bl": _bl_producer,               # paridad-limpia + fallback (default de app.py)
+    "bl_raw": compute_rnd_from_calls,  # calls crudos (default de la API)
+}
+
+
+def get_density_producer(method: str = "bl"):
+    """Devuelve el productor de densidad registrado o ValueError si no existe."""
+    try:
+        return DENSITY_PRODUCERS[method]
+    except KeyError:
+        raise ValueError(
+            f"Método de densidad desconocido {method!r}; "
+            f"opciones: {sorted(DENSITY_PRODUCERS)}"
+        )

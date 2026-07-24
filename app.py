@@ -21,10 +21,10 @@ from modules.data_provider.tastytrade_options import (
 from modules.data_provider.dxfeed_quotes import get_quotes_from_env
 from modules.data_provider.fmp import fetch_quote_history as fmp_quote_history
 from modules.utils import (
-    compute_rnd_from_calls,
-    compute_rnd_from_clean_calls,
     build_time_price_density,
-    build_clean_calls_from_chain,
+    cdf_quantiles,
+    normalized_cdf,
+    get_density_producer,
 )
 from modules.plots import plot_main_figure
 
@@ -143,26 +143,15 @@ def _build_pop_table(K_grid, pdf_K, spot):
 
     El CDF se extrae de la RND al vencimiento (ya incorpora todo el skew de IV).
     """
-    K_grid = np.asarray(K_grid, dtype=float)
-    pdf_K = np.asarray(pdf_K, dtype=float)
-    if len(K_grid) < 2:
-        return None
-    dx_K = float(K_grid[1] - K_grid[0])
-    pdf_clean = np.clip(np.nan_to_num(pdf_K), 0, None)
-    if pdf_clean.sum() <= 0 or dx_K <= 0:
-        return None
-    cdf = np.cumsum(pdf_clean) * dx_K
-    if cdf[-1] <= 0:
-        return None
-    cdf = cdf / cdf[-1]
-
     # Niveles del CDF a los que sampleamos el strike (orden ascendente).
     levels = [0.05, 0.10, 0.16, 0.25, 0.35, 0.50, 0.65, 0.75, 0.84, 0.90, 0.95]
+    strikes = cdf_quantiles(K_grid, pdf_K, levels)
+    if not np.isfinite(strikes).any():
+        return None
+
     rows = []
-    for lvl in levels:
-        idx = int(np.searchsorted(cdf, lvl))
-        idx = max(0, min(idx, len(K_grid) - 1))
-        K = float(K_grid[idx])
+    for lvl, K in zip(levels, strikes):
+        K = float(K)
         call_pop = lvl * 100.0
         put_pop = (1.0 - lvl) * 100.0
         pct_spot = (K - float(spot)) / float(spot) * 100.0 if spot else 0.0
@@ -209,30 +198,15 @@ def _compute_skew_payload(K_grid, pdf_K, ticker, spot, expiry_date, dte):
     """
     K_grid = np.asarray(K_grid, dtype=float)
     pdf_K = np.asarray(pdf_K, dtype=float)
-    if len(K_grid) < 2:
-        return None
-    dx_K = float(K_grid[1] - K_grid[0])
     pdf_clean = np.clip(np.nan_to_num(pdf_K), 0, None)
-    if pdf_clean.sum() <= 0 or dx_K <= 0:
+    cdf_K = normalized_cdf(K_grid, pdf_K)
+    if cdf_K is None:
         return None
 
-    cdf_K = np.cumsum(pdf_clean) * dx_K
-    if cdf_K[-1] <= 0:
-        return None
-    cdf_K = cdf_K / cdf_K[-1]
-
-    def _q(level):
-        idx = int(np.searchsorted(cdf_K, level))
-        idx = max(0, min(idx, len(K_grid) - 1))
-        return float(K_grid[idx])
-
-    quantiles = {
-        "q2p5": _q(0.025),
-        "q16":  _q(0.16),
-        "q50":  _q(0.50),
-        "q84":  _q(0.84),
-        "q97p5": _q(0.975),
-    }
+    q2p5, q16, q50, q84, q97p5 = (
+        float(x) for x in cdf_quantiles(K_grid, pdf_K, [0.025, 0.16, 0.50, 0.84, 0.975])
+    )
+    quantiles = {"q2p5": q2p5, "q16": q16, "q50": q50, "q84": q84, "q97p5": q97p5}
 
     if (quantiles["q97p5"] - quantiles["q2p5"]) > 0:
         skew = (
@@ -607,21 +581,15 @@ def render_densidades(ticker: str):
         st.warning(f"No options data for **{ticker}** expiry **{expiry_str}**. Try a different expiry.")
         st.stop()
 
+    # Densidad seleccionable por método (registro en modules.utils). "bl" =
+    # Breeden-Litzenberger: paridad-limpia y cae a calls crudos si hace falta.
+    rnd_method = "bl"
     try:
-        clean_calls_df = build_clean_calls_from_chain(
-            options_df, S0=spot, valuation_date=valuation_date,
+        producer = get_density_producer(rnd_method)
+        K_grid, pdf_K = producer(
+            options_df, spot=spot, valuation_date=valuation_date,
             expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
         )
-        if not clean_calls_df.empty:
-            K_grid, pdf_K = compute_rnd_from_clean_calls(
-                clean_calls_df, spot=spot, valuation_date=valuation_date,
-                expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
-            )
-        else:
-            K_grid, pdf_K = compute_rnd_from_calls(
-                options_df, spot=spot, valuation_date=valuation_date,
-                expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
-            )
     except Exception as e:
         st.error(f"Could not build RND: {e}")
         st.stop()
