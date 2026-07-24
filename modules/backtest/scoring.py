@@ -45,19 +45,58 @@ def winkler_score(S_T, lower, upper, alpha: float) -> float:
     return width
 
 
-def crps_from_density(K_grid, pdf, S_T) -> float:
+def crps_from_density(K_grid, pdf, S_T, common_grid=None) -> float:
     """
-    CRPS = ∫ (F(x) - 1{x >= S_T})^2 dx over the K_grid support, F the cone CDF.
+    CRPS = ∫ (F(x) - 1{x >= S_T})^2 dx, F the cone CDF.
 
-    Truncated to [K_min, K_max]; if S_T falls far outside the support the grid
-    tail is missing and the value is a lower bound (rare for near-money cones).
+    When `common_grid` is given, F is resampled onto it and its tails are extended
+    to 0/1 (interp left=0, right=1). This is required for apples-to-apples scoring
+    across methods and to avoid the truncation bias: a native K_grid that stops
+    before a realized tail move would silently DROP the tail penalty and make a
+    method that missed the tail look artificially good. Scores every forecast on
+    one generously padded grid so realized values are essentially always inside.
+
+    Without `common_grid` it integrates over K_grid only (legacy / primitive use).
     """
     K = np.asarray(K_grid, dtype=float)
-    F = normalized_cdf(K, pdf)
-    if F is None or not np.isfinite(S_T):
+    F_native = normalized_cdf(K, pdf)
+    if F_native is None or not np.isfinite(S_T):
         return float("nan")
-    heaviside = (K >= S_T).astype(float)
-    return float(np.trapezoid((F - heaviside) ** 2, K))
+    if common_grid is None:
+        grid, F = K, F_native
+    else:
+        grid = np.asarray(common_grid, dtype=float)
+        F = np.interp(grid, K, F_native, left=0.0, right=1.0)
+    heaviside = (grid >= S_T).astype(float)
+    return float(np.trapezoid((F - heaviside) ** 2, grid))
+
+
+def common_price_grid(k_grids, spot=None, n: int = 2000,
+                      floor_mult: float = 0.05, ceil_mult: float = 3.0) -> np.ndarray:
+    """
+    One generously padded price grid spanning every method's support (and, when
+    `spot` is given, at least [floor_mult, ceil_mult] * spot) so all forecasts
+    score on identical bins and realized values are essentially always inside.
+    """
+    mins = [float(np.min(k)) for k in k_grids if k is not None and len(k)]
+    maxs = [float(np.max(k)) for k in k_grids if k is not None and len(k)]
+    if not mins:
+        raise ValueError("common_price_grid needs at least one non-empty K_grid.")
+    lo, hi = min(mins), max(maxs)
+    if spot is not None and np.isfinite(spot) and spot > 0:
+        lo, hi = min(lo, floor_mult * spot), max(hi, ceil_mult * spot)
+    else:  # no spot anchor -> pad by half the observed span each side
+        span = hi - lo
+        lo, hi = lo - 0.5 * span, hi + 0.5 * span
+    return np.linspace(lo, hi, n)
+
+
+def is_crps_truncated(grid, S_T) -> bool:
+    """True if S_T falls outside the scoring grid (tail penalty is a lower bound)."""
+    if not np.isfinite(S_T):
+        return False
+    g = np.asarray(grid, dtype=float)
+    return not (g[0] <= S_T <= g[-1])
 
 
 def pit_value(K_grid, pdf, S_T) -> float:
@@ -72,19 +111,25 @@ def pit_value(K_grid, pdf, S_T) -> float:
 # -------------------------------------------------
 # Row / batch scoring over a driver results frame
 # -------------------------------------------------
-_SCORE_COLS = ["cov68", "cov95", "winkler68", "winkler95", "crps", "pit"]
+_SCORE_COLS = ["cov68", "cov95", "winkler68", "winkler95", "crps", "pit", "crps_truncated"]
+_TRIPLE_COLS = ["ticker", "construction_date", "expiry"]
 
 
-def score_row(row) -> dict:
-    """Score one driver row (needs q16/q84/q2p5/q97p5, K_grid, pdf, S_T)."""
+def score_row(row, common_grid=None) -> dict:
+    """
+    Score one driver row (needs q16/q84/q2p5/q97p5, K_grid, pdf, S_T). CRPS and
+    the truncation flag use `common_grid` when supplied so methods are comparable.
+    """
     S_T = row.get("S_T")
+    grid = common_grid if common_grid is not None else row["K_grid"]
     return {
         "cov68": coverage_indicator(S_T, row["q16"], row["q84"]),
         "cov95": coverage_indicator(S_T, row["q2p5"], row["q97p5"]),
         "winkler68": winkler_score(S_T, row["q16"], row["q84"], ALPHA_68),
         "winkler95": winkler_score(S_T, row["q2p5"], row["q97p5"], ALPHA_95),
-        "crps": crps_from_density(row["K_grid"], row["pdf"], S_T),
+        "crps": crps_from_density(row["K_grid"], row["pdf"], S_T, common_grid=common_grid),
         "pit": pit_value(row["K_grid"], row["pdf"], S_T),
+        "crps_truncated": bool(is_crps_truncated(grid, S_T)),
     }
 
 
@@ -93,6 +138,12 @@ def score_results(results: pd.DataFrame) -> pd.DataFrame:
     Score every scorable row and return a copy with the score columns added.
     Rows with status != 'ok' or a missing/non-finite S_T are EXCLUDED (dropped),
     never imputed. Use summarize_scores() for the drop accounting.
+
+    All methods sharing a (ticker, construction_date, expiry) triple are scored
+    on ONE common, generously padded grid (spanning every method's support and
+    the as-of spot), so CRPS/coverage are apples-to-apples across methods and the
+    tail-truncation bias is removed. When triple columns are absent (isolated
+    rows), each row gets its own padded grid.
     """
     scorable = results[
         (results.get("status", "ok") == "ok")
@@ -102,8 +153,26 @@ def score_results(results: pd.DataFrame) -> pd.DataFrame:
         for c in _SCORE_COLS:
             scorable[c] = pd.Series(dtype=float)
         return scorable
-    scores = scorable.apply(lambda r: pd.Series(score_row(r)), axis=1)
-    return pd.concat([scorable, scores], axis=1)
+
+    has_triples = all(c in scorable.columns for c in _TRIPLE_COLS)
+
+    def _grid_for(rows: pd.DataFrame) -> np.ndarray:
+        spot = float(rows["spot"].iloc[0]) if "spot" in rows.columns else None
+        return common_price_grid(list(rows["K_grid"]), spot=spot)
+
+    parts = []
+    if has_triples:
+        for _, grp in scorable.groupby(_TRIPLE_COLS, sort=False):
+            grid = _grid_for(grp)
+            scores = grp.apply(lambda r: pd.Series(score_row(r, common_grid=grid)), axis=1)
+            parts.append(pd.concat([grp, scores], axis=1))
+    else:
+        for _, row in scorable.iterrows():
+            grid = common_price_grid([row["K_grid"]],
+                                     spot=row.get("spot") if hasattr(row, "get") else None)
+            scores = pd.DataFrame([score_row(row, common_grid=grid)], index=[row.name])
+            parts.append(pd.concat([row.to_frame().T, scores], axis=1))
+    return pd.concat(parts).reindex(scorable.index)
 
 
 def summarize_scores(results: pd.DataFrame) -> dict:
@@ -136,5 +205,13 @@ def summarize_scores(results: pd.DataFrame) -> dict:
             "winkler95_mean": float(scored["winkler95"].mean()),
             "crps_mean": float(scored["crps"].mean()),
             "pit_mean": float(scored["pit"].mean()),
+            "n_crps_truncated": int(scored["crps_truncated"].sum()),
         })
+        # Truncation transparency: a nonzero count means some realized values fell
+        # outside even the padded grid; per-method so no single method is flattered.
+        if "method" in scored.columns:
+            out["crps_truncated_by_method"] = {
+                str(m): int(g["crps_truncated"].sum())
+                for m, g in scored.groupby("method", sort=False)
+            }
     return out

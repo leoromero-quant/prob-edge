@@ -18,6 +18,15 @@ import pandas as pd
 
 from modules.utils import cdf_quantiles, get_density_producer
 from modules.backtest.chain_cache import get_cached_chain
+from modules.backtest.baselines import BASELINES
+
+
+def resolve_producer(method: str):
+    """Resolve a backtest method to a producer: baselines first, then the density
+    registry. Keeps baselines out of the API's registry (its fail-loud guard)."""
+    if method in BASELINES:
+        return BASELINES[method]
+    return get_density_producer(method)
 
 # 95% (2.5/97.5), 68% (16/84), median — the cone the app already draws.
 CONE_LEVELS = (0.025, 0.16, 0.50, 0.84, 0.975)
@@ -149,7 +158,7 @@ def run_backtest(
         }
 
         for method in config.methods:
-            producer = get_density_producer(method)
+            producer = resolve_producer(method)
             try:
                 K_grid, pdf = producer(
                     chain, spot=spot, valuation_date=cd, expiry_date=exp,
