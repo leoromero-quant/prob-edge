@@ -73,3 +73,21 @@ def test_registry_known_methods():
     assert callable(get_density_producer("bl_raw"))
     with pytest.raises(ValueError):
         get_density_producer("does_not_exist")
+
+
+def test_api_rejects_non_bl_raw_method():
+    # The RND endpoint must fail loud on methods it can't serve yet (only the
+    # raw snapshot is available pre-Phase-B), not silently fall through to raw.
+    # Guard runs before any network call, so this needs no live token.
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api.routes.options import _prepare_rnd_data
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            _prepare_rnd_data("SPY", None, 0.045, 0.0, 50, 200, method="bl")
+        )
+    assert excinfo.value.status_code == 422
+    assert "bl_raw" in excinfo.value.detail

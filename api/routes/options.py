@@ -58,6 +58,19 @@ async def _prepare_rnd_data(
     n_grid: int,
     method: str = "bl_raw",
 ):
+    # El snapshot de tastytrade no viene normalizado (sin columna 'price' /
+    # paridad put-call), así que "bl" no es servible aquí todavía. Validar
+    # antes de pegarle a la red: fallar fuerte, no degradar en silencio al
+    # extractor crudo (Phase B lo habilita).
+    if method != "bl_raw":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"method '{method}' requires normalized chains, not available on "
+                f"this endpoint yet; use 'bl_raw'."
+            ),
+        )
+
     tt_token = await asyncio.to_thread(_get_tt_token)
 
     if not expiration:
@@ -82,8 +95,7 @@ async def _prepare_rnd_data(
         raise HTTPException(status_code=422, detail=f"El vencimiento {expiration} ya pasó o es hoy.")
 
     # CPU-bound (numpy + PCHIP); a thread para no bloquear el event loop
-    # cuando hay requests concurrentes. Productor seleccionable por `method`
-    # (default "bl_raw" = calls crudos, comportamiento histórico de la API).
+    # cuando hay requests concurrentes. `method` ya validado arriba (== bl_raw).
     producer = get_density_producer(method)
     price_grid, rnd_values = await asyncio.to_thread(
         producer,
