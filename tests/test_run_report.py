@@ -13,6 +13,7 @@ from modules.backtest.run_report import (
     render_by_method_regime,
     pit_histogram,
     save_outputs,
+    _sized_window,
     HEADLINE_METHODS,
 )
 
@@ -54,6 +55,25 @@ def test_render_tables_and_pit():
     # every observation lands in exactly one bin per method (3 obs each)
     bin_cols = [c for c in pit.columns if c != "method"]
     assert pit[bin_cols].sum(axis=1).tolist() == [3, 3]
+
+
+def test_sized_window_wider_for_higher_vol():
+    dates = pd.bdate_range("2025-01-01", periods=60)
+
+    def quotes_for(scale):
+        rng = np.random.default_rng(7)
+        closes = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.01 * scale, len(dates))))
+        return pd.DataFrame({"Date": dates, "Close": closes})
+
+    low = _sized_window(lambda tk: quotes_for(1.0), "SPY", "2025-03-01", "2025-03-31",
+                        vol_mult=6.0, min_hw=0.05)
+    high = _sized_window(lambda tk: quotes_for(4.0), "AAPL", "2025-03-01", "2025-03-31",
+                         vol_mult=6.0, min_hw=0.05)
+    # higher vol -> wider window (lower floor, higher ceil)
+    assert high[0] < low[0]
+    assert high[1] > low[1]
+    # windows straddle the money and stay within hard bounds
+    assert 0.4 <= high[0] < 1.0 < high[1] <= 1.8
 
 
 def test_save_outputs(tmp_path):

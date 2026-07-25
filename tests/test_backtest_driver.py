@@ -133,3 +133,26 @@ def test_run_pdf_is_valid_density(results):
 
 def test_run_dte_matches_bucket(results):
     assert set(results["dte"]) == {30, 7}
+
+
+def _chain_over(spot, as_of, expiry, lo_mult, hi_mult, step):
+    T = max((pd.Timestamp(expiry) - pd.Timestamp(as_of)).days / 365.25, 1e-6)
+    rows = []
+    for K in np.arange(round(spot * lo_mult), round(spot * hi_mult), step):
+        c = bs_price("call", spot, K, T, R, Q, SIGMA)
+        p = c - spot + K * math.exp(-R * T)
+        rows.append({"strike": float(K), "option_type": "call", "price": float(c)})
+        rows.append({"strike": float(K), "option_type": "put", "price": float(p)})
+    return pd.DataFrame(rows)
+
+
+def test_tail_clip_flag():
+    cfg = BacktestConfig(tickers=["T"], dte_buckets=[30], methods=["bl"],
+                         expiries=["2025-03-21"])
+    # Narrow chain: density support hugs spot -> cone quantiles hit the edge.
+    narrow = lambda t, a, e, *, spot, **k: _chain_over(spot, a, e, 0.97, 1.031, 1.0)
+    wide = lambda t, a, e, *, spot, **k: _chain_over(spot, a, e, 0.55, 1.45, 2.0)
+    r_narrow = run_backtest(cfg, quote_fetcher=_fake_quotes, chain_loader=narrow)
+    r_wide = run_backtest(cfg, quote_fetcher=_fake_quotes, chain_loader=wide)
+    assert r_narrow["tail_clip"].all()
+    assert not r_wide["tail_clip"].any()

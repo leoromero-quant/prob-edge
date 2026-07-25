@@ -26,7 +26,7 @@ from assets.config.settings import settings
 from modules.data_provider.fmp import fetch_quote_history
 from modules.backtest.chain_cache import get_cached_chain
 from modules.backtest.driver import BacktestConfig, run_backtest
-from modules.backtest.regimes import tag_regimes
+from modules.backtest.regimes import tag_regimes, trailing_realized_vol, _asof
 from modules.backtest.scoring import score_results, summarize_scores, summarize_by
 
 # Headline two-way: broker expected move vs the vanilla RN cone.
@@ -70,8 +70,24 @@ def save_outputs(scored: pd.DataFrame, outdir) -> dict:
 
 
 # ---------- live run ----------
+def _sized_window(quote_fetcher, ticker, as_of, expiry, *, vol_mult, min_hw,
+                  floor=0.4, ceil=1.8):
+    """
+    Per-triple fetch window ~ spot * [1 - h, 1 + h], h = vol_mult * sigma_return,
+    sigma_return from trailing realized vol (the only vol we have BEFORE pulling
+    the chain). vol_mult carries a VRP cushion so it approximates ~5 sigma of the
+    ATM-IV expected move (IV > realized). Auto-tight for SPY, auto-wide for AAPL.
+    """
+    rvol = _asof(trailing_realized_vol(quote_fetcher(ticker)), as_of)
+    T = max((pd.Timestamp(expiry) - pd.Timestamp(as_of)).days / 365.25, 1e-6)
+    sigma_ret = (rvol or 0.0) * np.sqrt(T)
+    h = max(vol_mult * sigma_ret, min_hw)
+    return max(1.0 - h, floor), min(1.0 + h, ceil)
+
+
 def build_report(config: BacktestConfig, *, fmp_key: str, polygon_key: str,
-                 quote_days: int = 1000, workers: int = 4, strike_step=None):
+                 quote_days: int = 1000, workers: int = 4, strike_step=None,
+                 vol_mult: float = 6.0, min_hw: float = 0.15):
     quote_cache: dict[str, pd.DataFrame] = {}
 
     def quote_fetcher(ticker: str) -> pd.DataFrame:
@@ -81,6 +97,11 @@ def build_report(config: BacktestConfig, *, fmp_key: str, polygon_key: str,
 
     def chain_loader(ticker, as_of_date, expiry, **kw):
         kw.pop("api_key", None)  # driver passes api_key=None; use the real key here
+        # Auto-size the fetch window per triple (~5 sigma of the expected move) so
+        # single names / high-vol periods don't clip the tail the CRPS depends on.
+        mlow, mhigh = _sized_window(quote_fetcher, ticker, as_of_date, expiry,
+                                    vol_mult=vol_mult, min_hw=min_hw)
+        kw["moneyness_low"], kw["moneyness_high"] = mlow, mhigh
         return get_cached_chain(ticker, as_of_date, expiry, api_key=polygon_key,
                                 workers=workers, strike_step=strike_step, **kw)
 
@@ -115,6 +136,10 @@ def main():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--strike-step", type=float, default=None,
                    help="Subsample strikes to this grid (e.g. 5) to cut rate-limited calls")
+    p.add_argument("--vol-mult", type=float, default=6.0,
+                   help="Fetch-window half-width in sigmas of the expected move (VRP cushion)")
+    p.add_argument("--min-hw", type=float, default=0.15,
+                   help="Floor on the fetch-window half-width (moneyness) per triple")
     p.add_argument("--cache-dir", default="sandbox/backtest_cache")
     p.add_argument("--out-dir", default="sandbox/backtest_out")
     p.add_argument("--smoke", action="store_true",
@@ -134,6 +159,7 @@ def main():
     results, scored = build_report(
         config, fmp_key=settings.FMP_API_KEY, polygon_key=settings.MASSIVE_API_KEY,
         workers=args.workers, strike_step=args.strike_step,
+        vol_mult=args.vol_mult, min_hw=args.min_hw,
     )
     _print_tables(results, scored)
     paths = save_outputs(scored, args.out_dir)

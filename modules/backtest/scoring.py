@@ -177,7 +177,7 @@ def score_results(results: pd.DataFrame) -> pd.DataFrame:
 
 def _metric_block(scored: pd.DataFrame) -> dict:
     """Empirical coverage + mean interval/CRPS/PIT over an already-scored frame."""
-    return {
+    block = {
         "n_scored": len(scored),
         "coverage68": float(scored["cov68"].mean()),
         "coverage95": float(scored["cov95"].mean()),
@@ -189,6 +189,9 @@ def _metric_block(scored: pd.DataFrame) -> dict:
         "pit_mean": float(scored["pit"].mean()),
         "n_crps_truncated": int(scored["crps_truncated"].sum()),
     }
+    if "tail_clip" in scored.columns:
+        block["n_tail_clip"] = int(scored["tail_clip"].fillna(False).sum())
+    return block
 
 
 def summarize_scores(results: pd.DataFrame) -> dict:

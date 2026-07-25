@@ -147,6 +147,13 @@ def run_backtest(
         if chain is None or chain.empty:
             continue
 
+        # Strike spacing + support edges, for the tail-clip flag: a cone whose
+        # 2.5%/97.5% quantile sits within one strike of the fetched-window edge
+        # has its tail clipped by the fetch window (the headline CRPS depends on
+        # that tail), so we flag it rather than let it bias silently.
+        strikes_sorted = np.sort(chain["strike"].dropna().unique())
+        strike_gap = float(np.median(np.diff(strikes_sorted))) if len(strikes_sorted) > 1 else np.nan
+
         base = {
             "ticker": ticker,
             "construction_date": t["construction_date"],
@@ -167,16 +174,23 @@ def run_backtest(
             except Exception as e:  # a bad chain shouldn't sink the whole run
                 rows.append({**base, "method": method, "status": f"error: {e}",
                              **{k: np.nan for k in _CONE_KEYS},
-                             "K_grid": None, "pdf": None})
+                             "K_grid": None, "pdf": None, "tail_clip": False})
                 continue
 
             q = cdf_quantiles(K_grid, pdf, CONE_LEVELS)
+            K_arr = np.asarray(K_grid, dtype=float)
+            gap = strike_gap if np.isfinite(strike_gap) else 0.0
+            tail_clip = bool(
+                np.isfinite(q[0]) and np.isfinite(q[4])
+                and (q[0] <= K_arr[0] + gap or q[4] >= K_arr[-1] - gap)
+            )
             rows.append({
                 **base,
                 "method": method,
                 **{k: float(v) for k, v in zip(_CONE_KEYS, q)},
-                "K_grid": np.asarray(K_grid, dtype=float),
+                "K_grid": K_arr,
                 "pdf": np.asarray(pdf, dtype=float),
+                "tail_clip": tail_clip,
                 "status": "ok",
             })
 
