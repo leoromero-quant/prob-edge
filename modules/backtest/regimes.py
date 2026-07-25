@@ -67,6 +67,7 @@ def tag_regimes(
     source: str = "realized",
     vix_fetcher=None,
     annualize: int = 252,
+    per_ticker: bool = True,
 ) -> pd.DataFrame:
     """
     Return a copy of `results` with two columns added:
@@ -75,6 +76,12 @@ def tag_regimes(
 
     quote_fetcher(ticker) -> DataFrame[Date, Close]  (for source="realized")
     vix_fetcher() -> DataFrame[Date, Close]           (for source="vix")
+
+    per_ticker=True (default for realized vol): terciles are computed within each
+    ticker, so the regime isolates the vol *environment* from the name. A global
+    split across names at different vol levels would mostly encode "which ticker"
+    (AAPL -> high, SPY -> low). VIX is market-wide and the split is the same either
+    way.
     """
     df = results.copy()
 
@@ -102,7 +109,13 @@ def tag_regimes(
     uniq = df.drop_duplicates(["ticker", "construction_date"])[
         ["ticker", "construction_date", "regime_vol"]
     ].copy()
-    uniq["regime"] = assign_terciles(uniq["regime_vol"].to_numpy())
+    if per_ticker:
+        parts = []
+        for _, g in uniq.groupby("ticker", sort=False):
+            parts.append(pd.Series(assign_terciles(g["regime_vol"].to_numpy()), index=g.index))
+        uniq["regime"] = pd.concat(parts).reindex(uniq.index)
+    else:
+        uniq["regime"] = assign_terciles(uniq["regime_vol"].to_numpy())
     key = uniq.set_index(["ticker", "construction_date"])["regime"]
     df["regime"] = [
         key.get((r["ticker"], r["construction_date"])) for _, r in df.iterrows()

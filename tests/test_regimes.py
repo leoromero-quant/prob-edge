@@ -93,6 +93,28 @@ def test_tag_regimes_dedup_not_skewed_by_methods():
     assert set(tagged["regime"]) == {"low", "mid", "high"}
 
 
+def _vol_quotes(scale):
+    dates = pd.bdate_range("2025-01-01", periods=120)
+    rng = np.random.default_rng(3)
+    rets = np.concatenate([rng.normal(0, 0.005 * scale, 60), rng.normal(0, 0.03 * scale, 60)])
+    return _quotes(dates, 100.0 * np.exp(np.cumsum(rets)))
+
+
+def test_tag_regimes_per_ticker_isolates_name():
+    # A is a low-abs-vol name, B a high-abs-vol name. Per-ticker terciles give each
+    # its own low/mid/high; a global split would deny B any "low" bucket.
+    qa, qb = _vol_quotes(0.3), _vol_quotes(3.0)
+    cons = ["2025-02-14", "2025-03-28", "2025-05-30"]
+    results = pd.DataFrame([
+        {"ticker": tk, "construction_date": c, "method": "bl"}
+        for tk in ("A", "B") for c in cons
+    ])
+    fetch = lambda tk: qa if tk == "A" else qb
+    tagged = tag_regimes(results, quote_fetcher=fetch, window=21, per_ticker=True)
+    for tk in ("A", "B"):
+        assert set(tagged[tagged["ticker"] == tk]["regime"]) == {"low", "mid", "high"}
+
+
 def test_tag_regimes_vix():
     results = pd.DataFrame([
         {"ticker": "AAA", "construction_date": c, "method": "bl"}

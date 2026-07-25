@@ -23,6 +23,7 @@ DataFrame out, no network).
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
@@ -219,6 +220,8 @@ def fetch_historical_chain(
     moneyness_low: float = 0.5,
     moneyness_high: float = 1.6,
     price_field: str = "c",
+    workers: int = 1,
+    strike_step: float | None = None,
 ) -> pd.DataFrame:
     """
     (ticker, expiry, as_of_date) -> normalized historical chain DataFrame.
@@ -229,6 +232,14 @@ def fetch_historical_chain(
 
     `price_field` = "c" (daily close) by default, temporally aligned with the EOD
     spot; "vw" (day VWAP) is a robustness alternative but mismatches the EOD spot.
+
+    `workers` > 1 pulls the per-contract aggregates through a bounded threadpool
+    (the 429 backoff in _get still applies). Sequential by default. NOTE: the
+    provider rate-limits per minute account-wide, so threads give little speedup;
+    `strike_step` is the real lever.
+
+    `strike_step` (e.g. 5.0) keeps only strikes on that grid, cutting the per-
+    contract call count. The number dropped is printed (never silently capped).
     """
     if spot is None or not np.isfinite(spot) or spot <= 0:
         raise ValueError("fetch_historical_chain requires a positive `spot` (as-of close).")
@@ -239,7 +250,20 @@ def fetch_historical_chain(
         c for c in contracts
         if c.get("strike_price") is not None and lo <= float(c["strike_price"]) <= hi
     ]
-    closes = {c["ticker"]: fetch_close(c["ticker"], as_of_date, api_key) for c in near}
+    if strike_step:
+        kept = [c for c in near
+                if abs(float(c["strike_price"]) / strike_step
+                       - round(float(c["strike_price"]) / strike_step)) < 1e-6]
+        print(f"  [{ticker} {as_of_date}->{expiry}] strike_step={strike_step}: "
+              f"kept {len(kept)}/{len(near)} near-money contracts")
+        near = kept
+    tickers = [c["ticker"] for c in near]
+    if workers and workers > 1 and len(tickers) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fetched = list(ex.map(lambda ct: fetch_close(ct, as_of_date, api_key), tickers))
+        closes = dict(zip(tickers, fetched))
+    else:
+        closes = {ct: fetch_close(ct, as_of_date, api_key) for ct in tickers}
 
     return normalize_historical_chain(
         near, closes, spot=spot, expiry=expiry, as_of=as_of_date,

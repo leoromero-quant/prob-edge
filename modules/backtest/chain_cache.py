@@ -35,6 +35,8 @@ def get_cached_chain(
     moneyness_low: float = 0.5,
     moneyness_high: float = 1.6,
     price_field: str = "c",
+    workers: int = 1,
+    strike_step: float | None = None,
     refresh: bool = False,
     loader=fetch_historical_chain,
 ) -> pd.DataFrame:
@@ -51,7 +53,7 @@ def get_cached_chain(
         ticker, expiry, as_of_date, api_key,
         spot=spot, r_annual=r_annual, q_annual=q_annual,
         moneyness_low=moneyness_low, moneyness_high=moneyness_high,
-        price_field=price_field,
+        price_field=price_field, workers=workers, strike_step=strike_step,
     )
 
     path.parent.mkdir(parents=True, exist_ok=True)
