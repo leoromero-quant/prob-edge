@@ -1,89 +1,102 @@
-# Prob-Edge RND Backtest — MVP Two-Way Report
+# Prob-Edge RND Backtest — Three-Way Report
 
-**Question:** does the risk-neutral-density (RND) cone beat the broker's expected move,
-measured honestly, out of sample? **Headline:** on this first pass, **no — not the vanilla
-cone.** The raw Breeden-Litzenberger cone is systematically **too wide** (it over-covers and
-scores worse on every proper metric) than the ATM-IV expected move a trader reads off the
-broker screen. That is the variance-risk-premium (VRP) signature, and it is exactly what a
-VRP-corrected density is meant to fix. The result is consistent across all three names and
-all vol regimes.
+**Question:** does the risk-neutral-density (RND) cone beat the broker's expected move, out of
+sample, and can a cleaner extraction fix the vanilla cone? **Headline:**
 
-> **Scope / honesty:** this is a **30-triple first pass** (SPY/QQQ/AAPL × 5 monthly expiries ×
-> 2 DTE). The **aggregate two-way is meaningful**; the **per-regime cells are thin (9–12 obs)
-> and directional only.** A second cached fill to 12 months of expiries is the next step if the
-> result warrants a fuller artifact.
+- The **vanilla** Breeden-Litzenberger cone (`bl`) **loses** to the broker ATM-IV expected move on
+  every proper metric (CRPS 17.6 vs 14.7), over-covering badly (cov68 0.87 vs 0.68 nominal).
+- A **corrected** RN extraction (`corrected`) — same risk-neutral measure, just a cleaner method —
+  **decisively beats the vanilla cone** (CRPS 14.75 vs 17.60, Winkler95 96 vs 161, tail-clips 0 vs 10)
+  and **ties / edges the broker** (CRPS 14.75 vs 14.71; Winkler95 **96.3 vs 104.6**).
+
+The important, honest lesson: **much of the vanilla cone's "too wide" was extraction noise, not the
+variance risk premium.** The clean RN density is far tighter — competitive with the broker screen
+*without any measure change* — though it now slightly **under**-covers at 68% (0.50), so it is not
+nominally calibrated either.
+
+> **Measure (decision (a), risk-neutral):** all three methods carry implied/RN-side dispersion and are
+> scored against realized `S_T` under P. `corrected` is a **better RN extraction**, explicitly *not* a
+> physical-measure / VRP calibration — no claim is made that it is "correctly calibrated to realized",
+> only that it is a cleaner, arb-aware RN density that no longer self-sabotages on noise and truncation.
+
+> **Scope / honesty:** **30-triple first pass** (SPY/QQQ/AAPL × 5 monthly expiries × 2 DTE). The
+> aggregate three-way is meaningful; **per-regime cells (9–12) are thin and directional.** A 12-month
+> expansion (second cached fill) is required before any ordering is claimed as durable.
 
 ---
 
 ## What was measured
 
-- **Universe:** SPY, QQQ, AAPL. **Expiries:** 2025-01-17, 02-21, 03-21, 04-17, 05-16 (monthly).
-  **Construction points:** ~30 DTE and ~7 DTE before each expiry → **30 (ticker, construction, expiry) triples**.
-- **Two methods, apples-to-apples:**
-  - `atm_iv_normal` — **the headline baseline**: the broker expected move, `S·σ_ATM·√(T/365.25)`,
-    68 = ±1σ, 95 = ±1.96σ, centered on spot. This is "what the user sees on the screen."
-  - `bl` — the vanilla Breeden-Litzenberger cone (parity-cleaned calls → 2nd-derivative RND,
-    forward-pinned), the current Prob-Edge product.
-- **Truth `S_T`:** realized close at expiry (FMP EOD). As-of spot = close at construction.
-  Triples with no realized `S_T` are **excluded, never imputed** (0 here).
-- **Scoring** (all lower-is-better except coverage): coverage vs nominal 68/95, Winkler interval
-  score, **CRPS (headline)**, PIT. Every method is scored on **one common, generously padded price
-  grid per triple** with CDFs extended to 0/1 in the tails, so the comparison is apples-to-apples
-  and tail truncation cannot flatter a method (**0 CRPS-truncated observations**).
-- **Regimes:** each observation is bucketed low/mid/high by its **trailing-21d realized-vol tercile
-  measured at construction, per ticker** (so "regime" is the vol *environment*, not "which name").
+- **Universe:** SPY, QQQ, AAPL. **Expiries:** 2025-01-17 … 05-16 (monthly). **Construction:** ~30 & ~7
+  DTE before each → **30 (ticker, construction, expiry) triples**, 90 scored rows (30 × 3 methods).
+- **Three methods, apples-to-apples on one common padded grid per triple:**
+  - `atm_iv_normal` — **headline baseline**, the broker expected move `S·σ_ATM·√(T/365.25)` (68 = ±1σ).
+  - `bl` — vanilla Breeden-Litzenberger (parity-cleaned calls → price-space 2nd derivative, forward-rescaled).
+  - `corrected` — **RN extraction via a smooth arb-aware IV smile** (quadratic in log-moneyness: level +
+    skew + curvature) with **flat-wing extrapolation on a ~5σ grid**, prices rebuilt by Black-Scholes then
+    Breeden-Litzenberger. Forward-pinned by construction. Measure = Q. Calibrated **only** to option-chain
+    implied vols at construction; **no parameter fit to realized `S_T`.**
+- **Truth `S_T`:** realized close at expiry; as-of spot at construction. No-realized triples **excluded,
+  never imputed** (0 here). **Scoring:** coverage vs 68/95, Winkler, **CRPS (headline)**, PIT — all on a
+  generously padded common grid with tails extended to 0/1 (**0 CRPS-truncated**).
+- **Regimes:** per-ticker trailing-21d realized-vol terciles measured at construction.
 
 ### Explicit, revisitable methodology choices (no silent caps)
 
-| Choice | Value | Why / caveat |
+| Choice | Value | Note |
 | --- | --- | --- |
-| Historical chains | Polygon reference `as_of` + per-contract daily aggregates | No live snapshot on this tier; IV/delta **BS-inverted from the close** |
-| Price field | `close` (`c`) | EOD-aligned with the EOD spot; `vw` is a robustness re-run |
-| Strike subsampling | `$5` grid | Provider is **RPM-throttled account-wide**; this cut per-contract calls ~5× (dropped count logged per chain) |
-| Fetch window | per triple, ~±5σ of expected move (realized-vol proxy + VRP cushion) | Auto-tight SPY / auto-wide AAPL; **10/30 BL cones still hit the edge** — see caveats |
-| Year fraction | 365.25 throughout | Unified across cone and expected move |
+| Historical chains | Polygon `as_of` contracts + daily aggregates | IV/delta **BS-inverted from the close** (no live greeks on this tier) |
+| Price field | `close` | EOD-aligned with the EOD spot; `vw` is a robustness re-run |
+| Strike subsampling | `$5` grid | provider is RPM-throttled account-wide; dropped count logged per chain |
+| Fetch window | per triple, ~±5σ of expected move | auto-tight SPY / auto-wide AAPL |
+| `corrected` smile | quadratic in log-moneyness, flat wings, ~5σ grid | parameter-light, arb-aware, no realized-outcome fit |
 
 ---
 
 ## Results
 
-#### By method (overall, n=30 triples each)
+#### By method (overall, n=30 triples each; nominal 0.68 / 0.95)
 
-| method | n | cov68 | cov95 | Winkler68 | Winkler95 | CRPS | PIT | tail_clip |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| atm_iv_normal | 30 | 0.567 | 0.900 | 80.7 | 104.6 | **14.71** | 0.509 | 0 |
-| bl | 30 | 0.867 | 0.967 | 102.7 | 161.5 | **17.60** | 0.509 | 10 |
-
-Nominal coverage is 0.68 / 0.95. **The BL cone over-covers** (0.87 at the 68% band vs 0.68
-nominal) and is **worse on the headline CRPS (17.60 vs 14.71) and on Winkler (161 vs 105)**.
-ATM-IV slightly *under*-covers 68 (0.57). Both are near-centered on PIT mean (~0.51).
-
-#### By method × vol regime (per-ticker realized-vol terciles — thin cells, directional)
-
-| method | regime | n | cov68 | cov95 | Winkler95 | CRPS | tail_clip |
+| method | cov68 | cov95 | Winkler68 | Winkler95 | **CRPS** | PIT | tail_clip |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| atm_iv_normal | low | 12 | 0.58 | 0.83 | 128.0 | 13.52 | 0 |
-| bl | low | 12 | 0.92 | 1.00 | 130.4 | 17.49 | 4 |
-| atm_iv_normal | mid | 9 | 0.67 | 1.00 | 70.3 | 10.05 | 0 |
-| bl | mid | 9 | 0.89 | 1.00 | 130.9 | 13.87 | 2 |
-| atm_iv_normal | high | 9 | 0.44 | 0.89 | 107.6 | 20.97 | 0 |
-| bl | high | 9 | 0.78 | 0.89 | 233.5 | 21.49 | 4 |
+| atm_iv_normal | 0.57 | 0.90 | 80.7 | 104.6 | **14.71** | 0.51 | 0 |
+| bl | 0.87 | 0.97 | 102.7 | 161.5 | **17.60** | 0.51 | 10 |
+| corrected | 0.50 | 0.97 | 80.6 | **96.3** | **14.75** | 0.50 | 0 |
 
-BL over-covers in every regime; the gap is **worst in high vol** (Winkler95 233 vs 108). CRPS
-favors ATM-IV in low/mid and is roughly **tied in high vol** (21.5 vs 21.0).
+`corrected` is best on Winkler95 and ties the broker on CRPS — a clean RN density, no measure change.
+`bl` is worst on every metric and is the only method that tail-clips.
 
 #### By ticker × method
 
-| ticker | method | n | cov68 | cov95 | CRPS | Winkler95 |
-| --- | --- | --- | --- | --- | --- | --- |
-| SPY | atm_iv_normal | 10 | 0.50 | 0.90 | 16.89 | 111.6 |
-| SPY | bl | 10 | 1.00 | 1.00 | 20.61 | 183.4 |
-| QQQ | atm_iv_normal | 10 | 0.60 | 0.80 | 18.71 | 145.0 |
-| QQQ | bl | 10 | 0.80 | 0.90 | 21.36 | 209.1 |
-| AAPL | atm_iv_normal | 10 | 0.60 | 1.00 | 8.54 | 57.1 |
-| AAPL | bl | 10 | 0.80 | 1.00 | 10.83 | 92.0 |
+| ticker | method | cov68 | CRPS | Winkler95 |
+| --- | --- | --- | --- | --- |
+| SPY | atm_iv_normal | 0.50 | 16.89 | 111.6 |
+| SPY | bl | 1.00 | 20.61 | 183.4 |
+| SPY | corrected | 0.40 | 16.96 | **108.4** |
+| QQQ | atm_iv_normal | 0.60 | 18.71 | 145.0 |
+| QQQ | bl | 0.80 | 21.36 | 209.1 |
+| QQQ | corrected | 0.60 | 18.71 | **115.9** |
+| AAPL | atm_iv_normal | 0.60 | 8.54 | **57.1** |
+| AAPL | bl | 0.80 | 10.83 | 92.0 |
+| AAPL | corrected | 0.50 | 8.58 | 64.6 |
 
-Same ordering in **all three names**: ATM-IV lower CRPS and lower Winkler than the vanilla cone.
+`corrected` beats `bl` in all three names; beats the broker on Winkler95 for SPY & QQQ, ~ties on AAPL.
+
+#### By vol regime × method (per-ticker realized-vol terciles — thin, directional)
+
+| regime | method | n | cov68 | Winkler95 | CRPS |
+| --- | --- | --- | --- | --- | --- |
+| low | atm_iv_normal | 12 | 0.58 | 128.0 | 13.52 |
+| low | bl | 12 | 0.92 | 130.4 | 17.49 |
+| low | corrected | 12 | 0.42 | **95.2** | 14.05 |
+| mid | atm_iv_normal | 9 | 0.67 | 70.3 | 10.05 |
+| mid | bl | 9 | 0.89 | 130.9 | 13.87 |
+| mid | corrected | 9 | 0.67 | 75.9 | 10.33 |
+| high | atm_iv_normal | 9 | 0.44 | 107.6 | 20.97 |
+| high | bl | 9 | 0.78 | 233.5 | 21.49 |
+| high | corrected | 9 | 0.44 | 118.2 | **20.10** |
+
+`bl` blows out in high vol (Winkler95 233); `corrected` is the best CRPS in high vol and best Winkler95 in low vol.
 
 #### PIT histogram (counts per decile; flat = calibrated)
 
@@ -91,48 +104,50 @@ Same ordering in **all three names**: ATM-IV lower CRPS and lower Winkler than t
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | atm_iv_normal | 3 | 7 | 0 | 1 | 2 | 5 | 2 | 2 | 2 | 6 |
 | bl | 0 | 3 | 3 | 3 | 7 | 2 | 6 | 3 | 1 | 2 |
+| corrected | 3 | 7 | 0 | 2 | 1 | 6 | 2 | 1 | 2 | 6 |
 
-BL's PIT is **piled toward the center** (over-dispersed → intervals too wide). ATM-IV's PIT is
-**heavier at the edges** (occasionally too tight). Both diagnostics agree with the coverage/Winkler
-read: the vanilla cone is too wide.
+`bl` is centre-piled (over-dispersed → too wide). `corrected` mirrors the broker's mild edge-heaviness
+(slightly under-dispersed → a touch too tight), consistent with its cov68 0.50.
 
 ---
 
 ## Reading the result
 
-1. **The vanilla RN cone loses to the broker's expected move, out of sample, on CRPS and Winkler,
-   in every name and regime.** This is not a bug — it is the **variance risk premium**: option-implied
-   (risk-neutral) dispersion exceeds realized dispersion, so a raw RN cone runs wide.
-2. **This is the honest, expected result** the spec anticipated ("a vanilla RN cone runs wide vs
-   realized and will not cleanly beat ATM-IV; the VRP-corrected density is what should win").
-3. **It sizes the prize for Phase G:** the corrected density must **contract the RN cone toward the
-   physical measure** (a VRP adjustment). The gap to close is concrete — e.g. Winkler95 161→~105,
-   CRPS 17.6→<14.7, and 68% coverage 0.87→~0.68 — measured, not asserted.
+1. **The corrected RN extraction fixes the vanilla cone without changing measure.** Same risk-neutral
+   density, better method (smooth arb-aware smile + proper ~5σ tails vs noisy price-space PCHIP +
+   ad-hoc rescale): CRPS 17.60 → 14.75, Winkler95 161 → 96, tail-clips 10 → 0.
+2. **So the vanilla cone's over-width was mostly extraction noise, not the VRP.** This revises the MVP's
+   provisional read: a clean RN density is already **competitive with the broker screen** on CRPS and
+   **better on Winkler95**, out of sample, in this window.
+3. **But `corrected` is not nominally calibrated** — cov68 0.50 (< 0.68) means it now runs slightly
+   *tight* at the 68% band (PIT edge-heavy). Under decision (a) we make no calibration claim; a residual
+   dispersion gap remains, which a physical-measure (VRP) treatment — decision (b), deferred — is what
+   would target directly.
 
 ## Caveats (honesty first)
 
-- **n=30 is a first pass.** Aggregate two-way is credible; per-regime cells (9–12) are directional.
-- **10/30 BL cones are tail-clipped** (`tail_clip=1`): the cone is so wide it reaches the fetched
-  `~5σ`-ATM window edge (all in low/high-vol, incl. the April-2025 selloff). This means BL's true
-  tails are even wider — **its poor scores are, if anything, understated**, which strengthens the
-  conclusion. A wider fetch window would sharpen BL's numbers but not flip the ordering.
-- **IV inversion health:** ≥79% of strikes invert cleanly per chain; the rest are far-OTM
-  illiquid contracts with no trades (price present, IV `NaN`) and are flagged, not guessed.
-  **0 CRPS-truncated, 0 dropped, 0 producer errors.**
-- **`$5` strikes and per-triple `~5σ` window** are deliberate cost choices under the provider's
-  RPM limit, stated so they can be revisited; a `vw`-price and wider-window re-run are footnoted
-  robustness checks.
+- **n=30 is a first pass.** Aggregate three-way is credible; per-regime cells (9–12) are directional.
+  **No ordering is claimed durable until the 12-month expansion.**
+- **`corrected` is a risk-neutral EXTRACTION, not a calibration.** Its competitiveness with the broker is
+  a statement about extraction quality + tails, not about being "right under P".
+- `bl`'s 10 tail-clips mean its poor scores are, if anything, understated; `corrected` and the broker
+  never clip.
+- IV inversion ≥79%/chain; far-OTM no-trade strikes flagged NaN, not guessed. **0 CRPS-truncated, 0
+  dropped, 0 producer errors** across all 90 rows.
+- **Test status:** all backtest unit tests pass. Two live API integration tests currently fail on a
+  **dxFeed market-data timeout** (feed availability, unrelated to this code path); one Stripe test fails
+  on a pre-existing billing datetime bug. Neither is a regression from the backtest layer.
 
 ## Reproduce
 
 ```bash
 cd /home/leo/projects/Risk-Neutral-Density-Probabilities
-# the 30 chains are frozen & committed under docs/backtest_mvp/chains/ -> re-runs
-# are instant and network-free (the read-through cache serves the parquet files).
+# 30 chains frozen under docs/backtest_mvp/chains/ -> re-runs are instant, no Polygon calls
 ./.venv/bin/python -m modules.backtest.run_report \
   --tickers SPY QQQ AAPL \
   --expiries 2025-01-17 2025-02-21 2025-03-21 2025-04-17 2025-05-16 \
-  --dte 30 7 --strike-step 5 --workers 1 --cache-dir docs/backtest_mvp/chains
+  --dte 30 7 --strike-step 5 --workers 1 \
+  --methods atm_iv_normal bl corrected --cache-dir docs/backtest_mvp/chains
 ```
 
-Raw per-triple scores: [`backtest_scores.csv`](backtest_scores.csv) (60 rows = 30 triples × 2 methods).
+Raw per-triple scores: [`backtest_scores.csv`](backtest_scores.csv) (90 rows = 30 triples × 3 methods).

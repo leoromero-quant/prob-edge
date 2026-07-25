@@ -19,13 +19,18 @@ import pandas as pd
 from modules.utils import cdf_quantiles, get_density_producer
 from modules.backtest.chain_cache import get_cached_chain
 from modules.backtest.baselines import BASELINES
+from modules.rnd_corrected import CORRECTED
+
+# Backtest-only producers (baselines + corrected density), merged so they resolve
+# by name without polluting the API's DENSITY_PRODUCERS / its fail-loud guard.
+_BACKTEST_PRODUCERS = {**BASELINES, **CORRECTED}
 
 
 def resolve_producer(method: str):
-    """Resolve a backtest method to a producer: baselines first, then the density
-    registry. Keeps baselines out of the API's registry (its fail-loud guard)."""
-    if method in BASELINES:
-        return BASELINES[method]
+    """Resolve a backtest method to a producer: backtest producers first, then the
+    density registry. Keeps them out of the API's registry (its fail-loud guard)."""
+    if method in _BACKTEST_PRODUCERS:
+        return _BACKTEST_PRODUCERS[method]
     return get_density_producer(method)
 
 # 95% (2.5/97.5), 68% (16/84), median — the cone the app already draws.

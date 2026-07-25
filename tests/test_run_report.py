@@ -54,7 +54,7 @@ def test_render_tables_and_pit():
     assert pit.shape[1] == 11
     # every observation lands in exactly one bin per method (3 obs each)
     bin_cols = [c for c in pit.columns if c != "method"]
-    assert pit[bin_cols].sum(axis=1).tolist() == [3, 3]
+    assert pit[bin_cols].sum(axis=1).tolist() == [3] * len(HEADLINE_METHODS)
 
 
 def test_sized_window_wider_for_higher_vol():

@@ -29,8 +29,8 @@ from modules.backtest.driver import BacktestConfig, run_backtest
 from modules.backtest.regimes import tag_regimes, trailing_realized_vol, _asof
 from modules.backtest.scoring import score_results, summarize_scores, summarize_by
 
-# Headline two-way: broker expected move vs the vanilla RN cone.
-HEADLINE_METHODS = ["atm_iv_normal", "bl"]
+# Three-way: broker expected move vs vanilla RN cone vs corrected RN density.
+HEADLINE_METHODS = ["atm_iv_normal", "bl", "corrected"]
 DEFAULT_EXPIRIES = [
     "2025-01-17", "2025-02-21", "2025-03-21", "2025-04-17", "2025-05-16",
 ]
@@ -132,6 +132,8 @@ def main():
     p.add_argument("--tickers", nargs="+", default=["SPY", "QQQ", "AAPL"])
     p.add_argument("--expiries", nargs="+", default=DEFAULT_EXPIRIES)
     p.add_argument("--dte", nargs="+", type=int, default=[30, 7])
+    p.add_argument("--methods", nargs="+", default=HEADLINE_METHODS,
+                   help="Producers to score (default: atm_iv_normal bl corrected)")
     p.add_argument("--moneyness", nargs=2, type=float, default=[0.5, 1.6])
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--strike-step", type=float, default=None,
@@ -150,7 +152,7 @@ def main():
     moneyness = [0.9, 1.1] if args.smoke else args.moneyness
 
     config = BacktestConfig(
-        tickers=tickers, dte_buckets=args.dte, methods=HEADLINE_METHODS,
+        tickers=tickers, dte_buckets=args.dte, methods=args.methods,
         expiries=args.expiries, moneyness_low=moneyness[0], moneyness_high=moneyness[1],
         cache_dir=args.cache_dir,
     )
