@@ -28,7 +28,7 @@ from modules.backtest.scoring import (
 
 SPOT, IV, R, Q = 100.0, 0.20, 0.0, 0.0
 VAL, EXP = pd.Timestamp("2025-01-01"), pd.Timestamp("2025-04-02")  # 91 days
-T_EM = (EXP - VAL).days / 365.0
+T_EM = (EXP - VAL).days / 365.25  # unified expected-move day-count
 
 
 def _chain():

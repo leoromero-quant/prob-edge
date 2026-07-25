@@ -175,43 +175,65 @@ def score_results(results: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts).reindex(scorable.index)
 
 
+def _metric_block(scored: pd.DataFrame) -> dict:
+    """Empirical coverage + mean interval/CRPS/PIT over an already-scored frame."""
+    return {
+        "n_scored": len(scored),
+        "coverage68": float(scored["cov68"].mean()),
+        "coverage95": float(scored["cov95"].mean()),
+        "nominal68": 0.68,
+        "nominal95": 0.95,
+        "winkler68_mean": float(scored["winkler68"].mean()),
+        "winkler95_mean": float(scored["winkler95"].mean()),
+        "crps_mean": float(scored["crps"].mean()),
+        "pit_mean": float(scored["pit"].mean()),
+        "n_crps_truncated": int(scored["crps_truncated"].sum()),
+    }
+
+
 def summarize_scores(results: pd.DataFrame) -> dict:
     """
-    Transparent, lookahead-free summary. Reports how many triples were dropped
-    for no realized S_T (or producer error) and the empirical vs nominal
+    Transparent, lookahead-free overall summary. Reports how many triples were
+    dropped for no realized S_T (or producer error) and the empirical vs nominal
     coverage plus mean Winkler / CRPS over what remains.
     """
     n_total = len(results)
     status = results.get("status", pd.Series(["ok"] * n_total, index=results.index))
-    n_producer_error = int((status != "ok").sum())
     no_realized = results["S_T"].apply(lambda v: v is None or not np.isfinite(v))
-    n_no_realized = int((no_realized & (status == "ok")).sum())
-
-    scored = score_results(results)
-    n_scored = len(scored)
     out = {
         "n_total": n_total,
-        "n_scored": n_scored,
-        "n_dropped_no_realized": n_no_realized,
-        "n_dropped_producer_error": n_producer_error,
+        "n_dropped_no_realized": int((no_realized & (status == "ok")).sum()),
+        "n_dropped_producer_error": int((status != "ok").sum()),
     }
-    if n_scored:
-        out.update({
-            "coverage68": float(scored["cov68"].mean()),
-            "coverage95": float(scored["cov95"].mean()),
-            "nominal68": 0.68,
-            "nominal95": 0.95,
-            "winkler68_mean": float(scored["winkler68"].mean()),
-            "winkler95_mean": float(scored["winkler95"].mean()),
-            "crps_mean": float(scored["crps"].mean()),
-            "pit_mean": float(scored["pit"].mean()),
-            "n_crps_truncated": int(scored["crps_truncated"].sum()),
-        })
-        # Truncation transparency: a nonzero count means some realized values fell
-        # outside even the padded grid; per-method so no single method is flattered.
+    scored = score_results(results)
+    out["n_scored"] = len(scored)
+    if len(scored):
+        out.update(_metric_block(scored))
+        # Per-method truncation transparency so no single method is flattered.
         if "method" in scored.columns:
             out["crps_truncated_by_method"] = {
                 str(m): int(g["crps_truncated"].sum())
                 for m, g in scored.groupby("method", sort=False)
             }
     return out
+
+
+def summarize_by(results: pd.DataFrame, by) -> pd.DataFrame:
+    """
+    Report every metric WITHIN groups — e.g. by=["method", "regime"] for the
+    coverage×method×regime and CRPS×method tables. Returns one row per group
+    (the grouping keys + the metric block). Drops unscorable rows first.
+    """
+    by = [by] if isinstance(by, str) else list(by)
+    scored = score_results(results)
+    if scored.empty:
+        return pd.DataFrame(columns=by + list(_metric_block(_EMPTY_SCORED).keys()))
+    rows = []
+    for keys, grp in scored.groupby(by, sort=False, dropna=False):
+        keys = keys if isinstance(keys, tuple) else (keys,)
+        rows.append({**dict(zip(by, keys)), **_metric_block(grp)})
+    return pd.DataFrame(rows)
+
+
+# Empty scored frame with the score columns, for empty-group column inference.
+_EMPTY_SCORED = pd.DataFrame({c: pd.Series(dtype=float) for c in _SCORE_COLS})

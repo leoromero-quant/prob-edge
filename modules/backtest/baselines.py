@@ -24,7 +24,8 @@ import pandas as pd
 
 from modules.utils import gaussian_density
 
-_EM_YEAR = 365.0  # spec's expected-move convention: sqrt(T/365)
+_EM_YEAR = 365.25  # unified with the cone / rest of the codebase (spec wrote 365; the
+                   # ~4-day-in-1000 difference is negligible, this removes the mismatch)
 
 
 def _tau_days(valuation_date, expiry_date) -> int:
