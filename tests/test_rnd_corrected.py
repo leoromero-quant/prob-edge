@@ -83,3 +83,25 @@ def test_needs_enough_strikes():
     tiny = pd.DataFrame([{"strike": 100.0, "option_type": "call", "iv": 0.2}])
     with pytest.raises(ValueError):
         corrected_rnd(tiny, SPOT, VAL, EXP, R, Q)
+
+
+def test_svi_fits_equity_skew():
+    from modules.rnd_corrected import _fit_svi, _svi_total_var
+    chain = _chain(lambda k: 0.20 + 0.15 * (SPOT - k) / SPOT)  # higher IV at low strikes
+    K, iv = chain[chain.option_type == "put"].strike.values, None
+    # use the module's own OTM smile extraction path via a direct fit
+    x = np.log(chain["strike"].to_numpy() / F)
+    w = (chain["iv"].to_numpy() ** 2) * T
+    p = _fit_svi(x, w, T)
+    assert p is not None
+    a, b, rho, m, s = p
+    assert b >= 0 and abs(rho) < 1 and s > 0
+    assert rho < 0  # equity skew -> negative correlation
+    # no-arb wing slope b(1+|rho|) < 2 (Lee bound), guaranteed by b<=1
+    assert b * (1 + abs(rho)) < 2.0
+
+
+def test_quad_fallback_still_valid():
+    K, pdf = corrected_rnd(_chain(lambda k: 0.20), SPOT, VAL, EXP, R, Q, smile="quad")
+    assert np.all(pdf >= 0)
+    assert np.trapezoid(pdf, K) == pytest.approx(1.0, abs=1e-6)
