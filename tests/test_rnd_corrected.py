@@ -77,6 +77,9 @@ def test_registered_and_resolves():
     from modules.backtest.driver import resolve_producer
     assert CORRECTED["corrected"] is corrected_rnd
     assert resolve_producer("corrected") is corrected_rnd
+    # both variants exposed as comparators (SVI default + flat-wing)
+    assert "corrected_quad" in CORRECTED
+    assert callable(resolve_producer("corrected_quad"))
 
 
 def test_needs_enough_strikes():

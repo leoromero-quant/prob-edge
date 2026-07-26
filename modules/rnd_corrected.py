@@ -155,6 +155,15 @@ def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
     return K_grid, pdf / area
 
 
-# Registry entry — resolved by the backtest driver alongside baselines. Kept out
-# of the API's DENSITY_PRODUCERS (and its fail-loud guard) deliberately.
-CORRECTED = {"corrected": corrected_rnd}
+def corrected_rnd_quad(*args, **kwargs):
+    """Flat-wing (quadratic-smile) variant — the pre-SVI extraction, kept as a
+    scored comparator: better body calibration, slightly worse CRPS than SVI."""
+    kwargs["smile"] = "quad"
+    return corrected_rnd(*args, **kwargs)
+
+
+# Registry entries — resolved by the backtest driver alongside baselines. Kept out
+# of the API's DENSITY_PRODUCERS (and its fail-loud guard) deliberately. Both
+# corrected variants are exposed so the report can present the SVI/flat-wing
+# trade-off side by side rather than forcing a single winner.
+CORRECTED = {"corrected": corrected_rnd, "corrected_quad": corrected_rnd_quad}
