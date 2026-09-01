@@ -437,6 +437,110 @@ def _check_paywall():
 # ─────────────────────────────────────────────
 # TAB: DENSIDADES
 # ─────────────────────────────────────────────
+def _metodologia_legacy():
+    """
+    Desarrollo del motor legacy: Breeden-Litzenberger sobre calls limpios por
+    paridad, con descuento explicito por r y segunda derivada numerica.
+    """
+    st.markdown(r"""
+We start from the option chain and build *clean* call prices.
+If $C(K)$ is the call price and $P(K)$ the put price at the same strike $K$,
+with spot $S_0$, risk–free rate $r$ and dividend yield $q$, we use:
+""")
+    st.latex(r"""
+C_{\text{clean}}(K) \approx
+\begin{cases}
+\dfrac{\text{bid} + \text{ask}}{2} & \text{if there is a valid spread} \\
+P(K) + S_0 e^{-qT} - K e^{-rT} & \text{(put–call parity)} \\
+\end{cases}
+""")
+    st.markdown(r"Then we remove discounting:")
+    st.latex(r"""
+\tilde C(K) = C_{\text{clean}}(K)\, e^{rT}
+\approx
+\mathbb{E}_Q\big[(S_T - K)^+\big],
+""")
+    st.markdown(r"and we apply the Breeden–Litzenberger formula:")
+    st.latex(r"f_Q(K) = \frac{\partial^2 \tilde C(K)}{\partial K^2}.")
+    st.markdown(r"Numerically, we interpolate, force $f_Q(K) \ge 0$ and normalize:")
+    st.latex(r"\int f_Q(K)\, dK = 1,")
+    st.markdown(r"also adjusting the first moment to match the theoretical forward:")
+    st.latex(r"\mathbb{E}_Q[S_T] = \int K\, f_Q(K)\, dK \approx S_0 e^{(r - q)T}.")
+    st.markdown(r"On each historical date $t$ we model intraday uncertainty as a Gaussian centered at the close $S_t$:")
+    st.latex(r"""
+p_{\text{hist}}(s \mid t)
+\propto
+\exp\left(
+-\frac{1}{2}\,
+\frac{(s - S_t)^2}{(\sigma_{\text{hist}} S_t)^2}
+\right),
+""")
+    st.markdown(r"with fixed $\sigma_{\text{hist}}$ relative to the price. The quantile $q_\alpha(t)$ satisfies:")
+    st.latex(r"\int_{-\infty}^{q_\alpha(t)} p_t(s)\, ds = \alpha,")
+    st.markdown(r"and from these we obtain the 68% and 95% confidence bands that define the probability cone shown in the chart.")
+
+
+def _metodologia_forward():
+    """
+    Desarrollo del motor forward: sonrisa SVI libre de arbitraje bajo medida
+    forward y densidad en forma cerrada. No es el mismo objeto que el legacy y
+    por eso se explica aparte en vez de reusar el texto.
+    """
+    st.markdown(r"""
+Bajo medida forward el descuento se cancela y no entra ninguna tasa. Lo primero
+es leer el forward de la propia cadena, sin suponerlo: por paridad put-call
+$C(K) - P(K) = e^{-rT}(F - K)$, de modo que el strike donde calls y puts cruzan
+es exactamente $F$.
+""")
+    st.latex(r"C(K^{*}) = P(K^{*}) \;\Longrightarrow\; F = K^{*}.")
+    st.markdown(r"""
+Con $F$ fijo se pasa a log-moneyness $k = \ln(K/F)$ y a varianza total
+implicita $w(k) = \sigma^{2}(k)\,T$, que es la variable en la que las
+condiciones de no arbitraje se escriben limpio. La sonrisa se ajusta con la
+parametrizacion cruda de SVI (Gatheral):
+""")
+    st.latex(r"""
+w(k) = a + b\left[\rho\,(k - m) + \sqrt{(k - m)^{2} + \sigma^{2}}\right].
+""")
+    st.markdown(r"""
+El ajuste se restringe a la condicion de mariposa de Durrleman, que es la que
+garantiza densidad no negativa:
+""")
+    st.latex(r"""
+g(k) = \left(1 - \frac{k\,w'(k)}{2\,w(k)}\right)^{2}
+     - \frac{w'(k)^{2}}{4}\left(\frac{1}{w(k)} + \frac{1}{4}\right)
+     + \frac{w''(k)}{2} \;\ge\; 0 .
+""")
+    st.markdown(r"""
+Fuera del rango de strikes cotizados las alas se extienden con pendiente
+acotada por la formula de momentos de Lee ($w'(k) \le 2$ asintoticamente), con
+mezcla exponencial para que $w$, $w'$ y $w''$ queden continuas en el empalme.
+Sin esa extension la malla queda truncada en los strikes observados y la masa
+de cola se pierde.
+
+Con $w$, $w'$ y $w''$ analiticas la densidad no se deriva dos veces por
+diferencias finitas: sale en forma cerrada.
+""")
+    st.latex(r"""
+p(k) = \frac{g(k)}{\sqrt{2\pi\,w(k)}}\;
+       \exp\!\left(-\tfrac{1}{2}\,d_{2}^{2}\right),
+\qquad
+d_{2} = -\frac{k}{\sqrt{w(k)}} - \frac{\sqrt{w(k)}}{2}.
+""")
+    st.markdown(r"El cambio de variable a precio divide entre $K$:")
+    st.latex(r"f_Q(K) = \frac{p(k)}{K}, \qquad K = F e^{k}.")
+    st.markdown(r"""
+Notese que la densidad es no negativa si y solo si se cumple la mariposa: el
+diagnostico y el objeto son la misma cosa, en vez de que uno diga que esta bien
+mientras el otro sale negativo. La verificacion que queda es la martingala,
+$\mathbb{E}_Q[S_T] = F$, que el panel de diagnosticos reporta en puntos base y
+que sobre catorce vencimientos da un error cuadratico medio de 1.15 pb.
+
+Las bandas del cono se construyen igual que en el otro motor, por cuantiles de
+$f_Q$ en cada fecha.
+""")
+
+
 def render_densidades(ticker: str):
     # Hero banner rendered later (just above the chart) replaces the old
     # st.subheader title — same message, branded layout with the icon.
@@ -555,20 +659,17 @@ def render_densidades(ticker: str):
         # Default desde el entorno (PROBEDGE_RND), sobreescribible en vivo para
         # poder comparar los dos conos sin reiniciar. `legacy` es el default para
         # que lo desplegado no cambie de comportamiento sin decision explicita.
+        # El selector de motor se dibuja arriba de la grafica, junto al
+        # interruptor del heatmap, porque son los dos controles que cambian lo
+        # que se ve. Aqui solo se fija el default y se lee el valor vigente:
+        # Streamlit vuelve a correr el script completo al cambiarlo, asi que el
+        # valor esta disponible antes de calcular la densidad.
         _default_mode = os.getenv("PROBEDGE_RND", "legacy").strip().lower()
         if _default_mode not in rnd_bridge.MODES:
             _default_mode = "legacy"
-        rnd_mode = st.radio(
-            "RND engine",
-            options=list(rnd_bridge.MODES),
-            index=list(rnd_bridge.MODES).index(_default_mode),
-            key="dens_engine",
-            help=("legacy: segunda derivada sobre calls limpios por paridad, el "
-                  "camino historico de la app. forward: medida forward, forward "
-                  "por cruce call-put, sonrisa ajustada y extension de cola "
-                  "acotada por Lee."),
-            horizontal=True,
-        )
+        if "dens_engine" not in st.session_state:
+            st.session_state["dens_engine"] = _default_mode
+        rnd_mode = st.session_state["dens_engine"]
 
         r_rate = st.number_input(
             "Risk-free rate (r, annual)",
@@ -583,9 +684,9 @@ def render_densidades(ticker: str):
         # Dividend yield (q) eliminado del UI — se asume 0 por simplicidad.
         q_rate = 0.0
 
-    # Density heatmap toggle now lives centered BELOW the chart — see the
-    # `st.toggle` block after plot_main_figure. We read its current value here
-    # so the chart renders with the right overlay on every rerun.
+    # El interruptor del heatmap se dibuja arriba de la grafica, junto al
+    # selector de motor. Aqui solo se lee el valor vigente, porque la lamina se
+    # construye antes de llegar a esa fila en el flujo del script.
     if "chk_density_heatmap" not in st.session_state:
         st.session_state["chk_density_heatmap"] = False
     show_heatmap = st.session_state["chk_density_heatmap"]
@@ -832,6 +933,49 @@ def render_densidades(ticker: str):
                 unsafe_allow_html=True,
             )
 
+    # ─── Controles de la grafica ─────────────────────────────────────────────
+    # Los dos controles que cambian lo que se ve van juntos y antes de la
+    # grafica, no despues: quien llega a la lamina primero encuentra con que
+    # modificarla. El heatmap enciende la capa de densidad; el motor decide con
+    # que metodo se calculo esa densidad, y por eso ambos mandan sobre la misma
+    # imagen.
+    st.markdown(
+        """
+        <style>
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            width: fit-content !important;
+            max-width: 100% !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    _ctl_l, _ctl_c, _ctl_r = st.columns([1, 3, 1])
+    with _ctl_c:
+        with st.container(border=True):
+            _c_heat, _c_eng = st.columns([1, 1.4])
+            with _c_heat:
+                st.toggle(
+                    "Show density heatmap",
+                    key="chk_density_heatmap",
+                    help="Overlay the implied probability density as a color "
+                         "heatmap. Brighter colors = more probability mass "
+                         "concentrated at that price level on that date.",
+                )
+            with _c_eng:
+                st.radio(
+                    "RND engine",
+                    options=list(rnd_bridge.MODES),
+                    key="dens_engine",
+                    help=("legacy: segunda derivada sobre calls limpios por "
+                          "paridad, el camino historico de la app. forward: "
+                          "medida forward, forward por cruce call-put, sonrisa "
+                          "ajustada y extension de cola acotada por Lee."),
+                    horizontal=True,
+                )
+
     plot_main_figure(
         quotes_df, dates_win, price_grid, density_win,
         expiry_dates=expiry_dates_win, valuation_date=valuation_date,
@@ -943,39 +1087,6 @@ def render_densidades(ticker: str):
     except Exception as _e:
         st.warning(f"El panel de Gamma Exposure no se pudo construir: {_e}")
 
-    # ─── Density heatmap toggle — centered, elegant, prominent ───
-    # The heatmap is the headline feature of the visualization (it's what
-    # makes the implied-density story visible), so the on/off switch lives
-    # right under the chart in its own bordered frame.
-    #
-    # Sizing strategy: we keep a moderately wide middle column so the toggle
-    # label never wraps, BUT we inject CSS that forces the bordered container
-    # to `width: fit-content` — that way the border hugs the toggle exactly,
-    # independent of viewport width / sidebar state. There is only one
-    # bordered container in the whole app, so a global selector is safe.
-    st.markdown(
-        """
-        <style>
-        [data-testid="stVerticalBlockBorderWrapper"] {
-            width: fit-content !important;
-            max-width: 100% !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    _spacer_l, _toggle_col, _spacer_r = st.columns([1, 2, 1])
-    with _toggle_col:
-        with st.container(border=True):
-            st.toggle(
-                "Show density heatmap",
-                key="chk_density_heatmap",
-                help="Overlay the implied probability density as a color heatmap. "
-                     "Brighter colors = more probability mass concentrated at that price level on that date.",
-            )
-
     # ─── Skew interpretation via Claude (streaming typewriter) ───
     skew_payload = _compute_skew_payload(
         K_grid, pdf_K, ticker, spot, expiry_date, future_days,
@@ -1028,8 +1139,24 @@ def render_densidades(ticker: str):
             "option expires OTM, i.e. the short keeps the full premium."
         )
 
-    # ─── Explanation & Math (unchanged) ───
+    # ─── Explanation & Math ───
+    # La explicacion cierra el circuito con los dos controles de arriba: el
+    # texto describe el metodo que efectivamente produjo la lamina que se acaba
+    # de ver, no un metodo generico. Cambiar el motor cambia esta seccion.
     st.subheader("Explanation")
+    if rnd_mode == "forward":
+        st.info(
+            "Motor activo: **forward**. La densidad se obtiene de una sonrisa "
+            "SVI libre de arbitraje bajo medida forward, en forma cerrada. El "
+            "desarrollo de abajo corresponde a este motor."
+        )
+    else:
+        st.info(
+            "Motor activo: **legacy**. La densidad se obtiene por segunda "
+            "derivada numerica sobre calls limpios por paridad, descontando con "
+            "r. El desarrollo de abajo corresponde a este motor. Cambia el motor "
+            "arriba de la grafica para ver el otro."
+        )
     st.markdown(r"""
 This chart shows how the options market assigns probabilities to different price levels over time.
 The heatmap translates those probabilities into colors so you can see where probability mass is concentrated.
@@ -1059,42 +1186,10 @@ and understand how the market is pricing future uncertainty.
     # buried in formulas, but one click reveals the full Breeden–Litzenberger
     # derivation for the quantitatively inclined.
     with st.expander("Mathematical summary of the methodology", expanded=False):
-        st.markdown(r"""
-We start from the option chain and build *clean* call prices.
-If $C(K)$ is the call price and $P(K)$ the put price at the same strike $K$,
-with spot $S_0$, risk–free rate $r$ and dividend yield $q$, we use:
-""")
-        st.latex(r"""
-C_{\text{clean}}(K) \approx
-\begin{cases}
-\dfrac{\text{bid} + \text{ask}}{2} & \text{if there is a valid spread} \\
-P(K) + S_0 e^{-qT} - K e^{-rT} & \text{(put–call parity)} \\
-\end{cases}
-""")
-        st.markdown(r"Then we remove discounting:")
-        st.latex(r"""
-\tilde C(K) = C_{\text{clean}}(K)\, e^{rT}
-\approx
-\mathbb{E}_Q\big[(S_T - K)^+\big],
-""")
-        st.markdown(r"and we apply the Breeden–Litzenberger formula:")
-        st.latex(r"f_Q(K) = \frac{\partial^2 \tilde C(K)}{\partial K^2}.")
-        st.markdown(r"Numerically, we interpolate, force $f_Q(K) \ge 0$ and normalize:")
-        st.latex(r"\int f_Q(K)\, dK = 1,")
-        st.markdown(r"also adjusting the first moment to match the theoretical forward:")
-        st.latex(r"\mathbb{E}_Q[S_T] = \int K\, f_Q(K)\, dK \approx S_0 e^{(r - q)T}.")
-        st.markdown(r"On each historical date $t$ we model intraday uncertainty as a Gaussian centered at the close $S_t$:")
-        st.latex(r"""
-p_{\text{hist}}(s \mid t)
-\propto
-\exp\left(
--\frac{1}{2}\,
-\frac{(s - S_t)^2}{(\sigma_{\text{hist}} S_t)^2}
-\right),
-""")
-        st.markdown(r"with fixed $\sigma_{\text{hist}}$ relative to the price. The quantile $q_\alpha(t)$ satisfies:")
-        st.latex(r"\int_{-\infty}^{q_\alpha(t)} p_t(s)\, ds = \alpha,")
-        st.markdown(r"and from these we obtain the 68% and 95% confidence bands that define the probability cone shown in the chart.")
+        if rnd_mode == "forward":
+            _metodologia_forward()
+        else:
+            _metodologia_legacy()
 
 
 # ─────────────────────────────────────────────
