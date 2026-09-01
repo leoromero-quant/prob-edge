@@ -280,15 +280,28 @@ async def _fetch_options_async(
     results: dict[str, dict] = {s: {} for s in symbols}
     received_greeks = set()
     received_quote  = set()
+    received_summary = set()
     all_syms = set(symbols)
 
-    # Suscripciones para Greeks y Quote
-    greeks_subs = [{"type": "Greeks", "symbol": s} for s in symbols]
-    quote_subs  = [{"type": "Quote",  "symbol": s} for s in symbols]
+    # Suscripciones. `Summary` y `Trade` se agregaron el 1 de septiembre de 2026,
+    # despues de verificar con mercado abierto que el streamer token de TastyTrade
+    # SI los autoriza sobre simbolos de opciones (scripts/probe_summary_oi.py:
+    # 12/12 contratos con openInterest y dayVolume no nulos sobre SPY).
+    # Esto desbloquea interes abierto y volumen, y con ellos GEX, muros de calls
+    # y puts, max pain, DEX y las razones put-call, que estaban bloqueadas desde
+    # la auditoria del dia 0.
+    greeks_subs  = [{"type": "Greeks",  "symbol": s} for s in symbols]
+    quote_subs   = [{"type": "Quote",   "symbol": s} for s in symbols]
+    summary_subs = [{"type": "Summary", "symbol": s} for s in symbols]
+    trade_subs   = [{"type": "Trade",   "symbol": s} for s in symbols]
 
     greeks_fields = ["eventType", "eventSymbol", "volatility", "delta",
                      "gamma", "theta", "vega", "rho"]
     quote_fields  = ["eventType", "eventSymbol", "bidPrice", "askPrice"]
+    summary_fields = ["eventType", "eventSymbol", "openInterest", "prevDayVolume",
+                      "dayOpenPrice", "dayHighPrice", "dayLowPrice",
+                      "prevDayClosePrice"]
+    trade_fields  = ["eventType", "eventSymbol", "price", "size", "dayVolume"]
 
     async with websockets.connect(
         ws_url,
@@ -362,13 +375,15 @@ async def _fetch_options_async(
                     "acceptAggregationPeriod": 0.1,
                     "acceptDataFormat": "COMPACT",
                     "acceptEventFields": {
-                        "Greeks": greeks_fields,
-                        "Quote":  quote_fields,
+                        "Greeks":  greeks_fields,
+                        "Quote":   quote_fields,
+                        "Summary": summary_fields,
+                        "Trade":   trade_fields,
                     },
                 }))
                 # Suscribir en lotes de 500 para no exceder límites
                 batch_size = 500
-                all_subs = greeks_subs + quote_subs
+                all_subs = greeks_subs + quote_subs + summary_subs + trade_subs
                 first_batch = True
                 for i in range(0, len(all_subs), batch_size):
                     batch = all_subs[i:i + batch_size]
@@ -391,11 +406,18 @@ async def _fetch_options_async(
                 data_list = msg.get("data", [])
                 _process_options_feed_data(
                     data_list, results, received_greeks, received_quote,
-                    event_fields, greeks_fields, quote_fields
+                    event_fields, greeks_fields, quote_fields,
+                    received_summary=received_summary,
+                    default_summary_fields=summary_fields,
+                    default_trade_fields=trade_fields,
                 )
 
-                # Terminar cuando tengamos Greeks + Quote de todos (o suficiente)
-                if (received_greeks >= all_syms and received_quote >= all_syms):
+                # Terminar cuando tengamos Greeks + Quote + Summary de todos.
+                # Trade no entra en la condicion de corte: un contrato sin
+                # operaciones en el dia simplemente no publica Trade, y esperarlo
+                # colgaria la captura hasta el timeout.
+                if (received_greeks >= all_syms and received_quote >= all_syms
+                        and received_summary >= all_syms):
                     logger.debug("Todos los datos de opciones recibidos")
                     break
                 continue
@@ -415,9 +437,12 @@ def _process_options_feed_data(
     event_fields: dict,
     default_greeks_fields: list,
     default_quote_fields: list,
+    received_summary: set | None = None,
+    default_summary_fields: list | None = None,
+    default_trade_fields: list | None = None,
 ) -> None:
     """
-    Parsea FEED_DATA en formato COMPACT para Greeks y Quote.
+    Parsea FEED_DATA en formato COMPACT para Greeks, Quote, Summary y Trade.
     data_list[0] = eventType string (ej. "Greeks")
     data_list[1] = flat array de eventos
     """
@@ -435,6 +460,10 @@ def _process_options_feed_data(
         fields = event_fields.get("Greeks", default_greeks_fields)
     elif etype == "Quote":
         fields = event_fields.get("Quote", default_quote_fields)
+    elif etype == "Summary" and default_summary_fields is not None:
+        fields = event_fields.get("Summary", default_summary_fields)
+    elif etype == "Trade" and default_trade_fields is not None:
+        fields = event_fields.get("Trade", default_trade_fields)
     else:
         return
 
@@ -470,6 +499,32 @@ def _process_options_feed_data(
             if ask is not None: results[sym]["ask"] = float(ask)
             received_quote.add(sym)
 
+        elif etype == "Summary":
+            # ADVERTENCIA que hay que declarar en cualquier reporte: el interes
+            # abierto de OPRA es del cierre ANTERIOR. Lo produce la OCC en el
+            # ciclo de compensacion nocturno y se publica a la manana siguiente.
+            # El OI del dia d es siempre el del cierre de d menos uno. Max pain y
+            # GEX calculados sobre el son correctos solo si el lector sabe de que
+            # dia son.
+            oi = obj.get("openInterest")
+            pv = obj.get("prevDayVolume")
+            if oi is not None: results[sym]["open_interest"] = float(oi)
+            if pv is not None: results[sym]["prev_day_volume"] = float(pv)
+            for src, dst in (("dayOpenPrice", "day_open"),
+                             ("dayHighPrice", "day_high"),
+                             ("dayLowPrice", "day_low"),
+                             ("prevDayClosePrice", "prev_close")):
+                v = obj.get(src)
+                if v is not None: results[sym][dst] = float(v)
+            if received_summary is not None:
+                received_summary.add(sym)
+
+        elif etype == "Trade":
+            # dayVolume es volumen INTRADIA acumulado, no del dia anterior.
+            p_ = obj.get("price"); dv = obj.get("dayVolume")
+            if p_ is not None: results[sym]["last_price"] = float(p_)
+            if dv is not None: results[sym]["volume"] = float(dv)
+
 
 # ── API pública ───────────────────────────────────────────────────────────────
 
@@ -484,9 +539,17 @@ def fetch_options_snapshot(ticker: str, expiry: str, tt_token: str) -> pd.DataFr
     2. Suscribir todos los streamer symbols a dxFeed (Greeks + Quote)
     3. Construir DataFrame con los datos recibidos
 
-    Nota: open_interest, last_price y volume NO están disponibles vía dxFeed
-    en tiempo real (requieren endpoint REST adicional de tastytrade). Se dejan
-    como NaN — el módulo de RND solo requiere bid/ask/iv/delta/gamma.
+    Nota historica, corregida el 1 de septiembre de 2026: se creia que
+    open_interest, last_price y volume no estaban disponibles via dxFeed y
+    requerian un endpoint REST adicional. Es falso. Se verifico con mercado
+    abierto (scripts/probe_summary_oi.py) que el streamer token de TastyTrade
+    autoriza los eventos `Summary` y `Trade` sobre simbolos de opciones, y que
+    entregan openInterest, prevDayVolume y dayVolume en 12 de 12 contratos.
+
+    ADVERTENCIA sobre el interes abierto: es del cierre ANTERIOR. Lo produce la
+    OCC en el ciclo de compensacion nocturno. El OI del dia d es el del cierre de
+    d menos uno, y eso debe declararse en cualquier reporte que publique GEX,
+    muros o max pain. `volume` en cambio es intradia acumulado del dia en curso.
     """
     logger.info(f"Obteniendo strikes de {ticker} exp {expiry}...")
     strikes = _get_nested_strikes(ticker, expiry, tt_token)
@@ -521,14 +584,14 @@ def fetch_options_snapshot(ticker: str, expiry: str, tt_token: str) -> pd.DataFr
             "contract_type": contract_type,
             "bid":           data.get("bid"),
             "ask":           data.get("ask"),
-            "last_price":    None,       # No disponible vía dxFeed streaming
-            "open_interest": None,       # No disponible vía dxFeed streaming
+            "last_price":    data.get("last_price"),      # evento Trade
+            "open_interest": data.get("open_interest"),   # evento Summary, cierre anterior
             "iv":            data.get("iv"),
             "delta":         data.get("delta"),
             "gamma":         data.get("gamma"),
             "theta":         data.get("theta"),
             "vega":          data.get("vega"),
-            "volume":        None,       # No disponible vía dxFeed streaming
+            "volume":        data.get("volume"),         # evento Trade, intradia acumulado
             "rho":           data.get("rho"),
         }
         rows.append(row)
@@ -539,7 +602,8 @@ def fetch_options_snapshot(ticker: str, expiry: str, tt_token: str) -> pd.DataFr
     df = pd.DataFrame(rows)
 
     # Convertir numéricos
-    num_cols = ["strike", "bid", "ask", "iv", "delta", "gamma", "theta", "vega", "rho"]
+    num_cols = ["strike", "bid", "ask", "iv", "delta", "gamma", "theta", "vega", "rho",
+                "open_interest", "volume", "last_price"]
     for col in num_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")

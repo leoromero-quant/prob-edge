@@ -1,0 +1,13 @@
+[Unit]
+Description=Prob-Edge, captura intradia de cadenas de opciones
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/leo/Documents/Claude/Projects/Prob-Edge
+# El propio script consulta el calendario NYSE y sale sin hacer nada si hoy no
+# hay sesion o si esta fuera del horario regular. systemd solo sabe de dias de
+# la semana: dispararia en feriados y a deshora los dias de cierre temprano.
+ExecStart=/home/leo/Documents/Claude/Projects/Prob-Edge/.venv/bin/python \
+  scripts/capture_raw_chains.py --intraday --timeout 25

@@ -6,3 +6,13 @@ __pycache__/
 .pytest_cache/
 rnd.db
 tastytrade/
+
+# Snapshots crudos de cadenas: nunca en git
+data/raw/
+
+# Conjunto de investigacion interna: no se versiona ni se publica
+data/research/
+data/fmp_cache/
+data/series/
+reports/preview/
+data/intraday/

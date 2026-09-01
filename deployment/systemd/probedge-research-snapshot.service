@@ -1,0 +1,10 @@
+[Unit]
+Description=Prob-Edge, snapshot diario del conjunto de investigacion interna
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/leo/Documents/Claude/Projects/Prob-Edge
+EnvironmentFile=/home/leo/Documents/Claude/Projects/Prob-Edge/.env
+ExecStart=/bin/bash -c 'set -euo pipefail; d=$(date +%%F); out=data/research/ohlc_$d.csv.gz; [ -f "$out" ] && exit 0; mkdir -p data/research; curl -sSfL --max-time 120 -o data/research/.tmp_$d.csv "$RESEARCH_CSV_URL"; gzip -f data/research/.tmp_$d.csv; mv data/research/.tmp_$d.csv.gz "$out"'

@@ -531,3 +531,4 @@ def plot_main_figure(
     )
 
     st.plotly_chart(fig, width="stretch")
+    return fig

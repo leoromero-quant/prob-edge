@@ -27,6 +27,8 @@ from modules.utils import (
     build_clean_calls_from_chain,
 )
 from modules.plots import plot_main_figure
+from modules import rnd_bridge
+from modules import rnd_forward as rnd_forward_mod
 
 # Asegurar raíz del proyecto en sys.path
 ROOT = Path(__file__).resolve().parent
@@ -500,9 +502,13 @@ def render_densidades(ticker: str):
                 if dt is None:
                     continue
                 days = (dt - today).days
-                if days < 21 or days > 60:
+                # Default del vencimiento: el mas cercano a 45 dias. Decidido el
+                # 1 de septiembre de 2026: 45 dias es el ancla estandar de mesa
+                # para venta de prima, y es la misma que usa el ranking para el
+                # sesgo a 25 deltas.
+                if days < 21 or days > 75:
                     continue
-                distance = abs(days - 30)
+                distance = abs(days - 45)
                 if best_distance is None or distance < best_distance:
                     best_distance = distance
                     best_idx = idx
@@ -545,7 +551,35 @@ def render_densidades(ticker: str):
 
         past_days = st.number_input("Historical window (days)", min_value=30, max_value=2000, value=120, step=10, key="dens_past")
 
-        r_rate = st.number_input("Risk-free rate (r, annual)", value=float(settings.DEFAULT_RATE), step=0.005, format="%.3f", key="dens_r")
+        # ── Interruptor de motor de densidad ───────────────────────────────
+        # Default desde el entorno (PROBEDGE_RND), sobreescribible en vivo para
+        # poder comparar los dos conos sin reiniciar. `legacy` es el default para
+        # que lo desplegado no cambie de comportamiento sin decision explicita.
+        _default_mode = os.getenv("PROBEDGE_RND", "legacy").strip().lower()
+        if _default_mode not in rnd_bridge.MODES:
+            _default_mode = "legacy"
+        rnd_mode = st.radio(
+            "RND engine",
+            options=list(rnd_bridge.MODES),
+            index=list(rnd_bridge.MODES).index(_default_mode),
+            key="dens_engine",
+            help=("legacy: segunda derivada sobre calls limpios por paridad, el "
+                  "camino historico de la app. forward: medida forward, forward "
+                  "por cruce call-put, sonrisa ajustada y extension de cola "
+                  "acotada por Lee."),
+            horizontal=True,
+        )
+
+        r_rate = st.number_input(
+            "Risk-free rate (r, annual)",
+            value=float(settings.DEFAULT_RATE), step=0.005, format="%.3f",
+            key="dens_r",
+            disabled=(rnd_mode == "forward"),
+            help=("No aplica en modo forward: el descuento se cancela bajo medida "
+                  "forward y el forward se lee del cruce call-put."),
+        )
+        if rnd_mode == "forward":
+            st.caption("r sin efecto en modo forward.")
         # Dividend yield (q) eliminado del UI — se asume 0 por simplicidad.
         q_rate = 0.0
 
@@ -608,22 +642,16 @@ def render_densidades(ticker: str):
         st.stop()
 
     try:
-        clean_calls_df = build_clean_calls_from_chain(
-            options_df, S0=spot, valuation_date=valuation_date,
+        K_grid, pdf_K, rnd_diag = rnd_bridge.density(
+            options_df, spot=spot, valuation_date=valuation_date,
             expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
+            mode=rnd_mode,
         )
-        if not clean_calls_df.empty:
-            K_grid, pdf_K = compute_rnd_from_clean_calls(
-                clean_calls_df, spot=spot, valuation_date=valuation_date,
-                expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
-            )
-        else:
-            K_grid, pdf_K = compute_rnd_from_calls(
-                options_df, spot=spot, valuation_date=valuation_date,
-                expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
-            )
     except Exception as e:
-        st.error(f"Could not build RND: {e}")
+        st.error(f"Could not build RND ({rnd_mode}): {e}")
+        if rnd_mode == "forward":
+            st.info("Cambia el motor a `legacy` en la barra lateral para seguir "
+                    "trabajando mientras se revisa la cadena de este vencimiento.")
         st.stop()
 
     rnd_by_date = {pd.Timestamp(expiry_date): (K_grid, pdf_K)}
@@ -809,6 +837,111 @@ def render_densidades(ticker: str):
         expiry_dates=expiry_dates_win, valuation_date=valuation_date,
         show_heatmap=show_heatmap,
     )
+
+    # ─── Diagnosticos del motor de densidad ──────────────────────────────────
+    # Solo en modo forward hay diagnosticos que auditar: el legacy no cumple la
+    # condicion de martingala por construccion, asi que no hay nada que medir
+    # contra la superficie. Este panel es el que permite decidir si la densidad
+    # que se esta viendo es publicable o no.
+    with st.expander(f"RND diagnostics — engine: {rnd_mode}", expanded=False):
+        if rnd_diag.get("mode") == "legacy":
+            st.caption(rnd_diag.get("nota", ""))
+            st.caption(
+                "Cambia el motor a `forward` en la barra lateral para ver el cono "
+                "con la densidad corregida y sus diagnosticos."
+            )
+        else:
+            d = rnd_diag
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Forward (cruce C-P)", f"{d['forward']:.2f}",
+                      f"{d['basis_bp']:+.0f} pb vs spot")
+            c2.metric("Media vs forward", f"{d['mean_vs_forward_bp']:+.2f} pb",
+                      help="Condicion de martingala. Medido: rmse de 1.15 pb sobre "
+                           "14 vencimientos. Por encima de ~5 pb, revisar la cadena.")
+            c3.metric("Integral", f"{d['integral']:.4f}")
+            c4.metric("R2 de la sonrisa", f"{d['smile_r2']:.4f}",
+                      f"{d['smile_points']} puntos")
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("IV ATM", f"{d['atm_iv']*100:.2f}%")
+            c2.metric("MFIV (swap de varianza)",
+                      f"{d['mfiv']*100:.2f}%" if d.get("mfiv") else "n/d",
+                      help="Es la medida que usa el ranking. Domina a la ATM cuando "
+                           "hay sesgo y convexidad.")
+            c3.metric("Desv / lognormal", f"{d['sd_ratio_lognormal']:.3f}",
+                      help="Con sesgo y colas gruesas debe estar por encima de 1. "
+                           "Medido entre 1.06 y 1.15.")
+            c4.metric("Cola vs lognormal",
+                      f"{d['tail_ratio']:.2f}x" if d.get("tail_ratio") else "n/d",
+                      help="Masa mas alla de 2 sigmas contra la lognormal de la "
+                           "misma IV ATM.")
+
+            st.markdown("**Procedencia de cada momento.** Fraccion que aporta la "
+                        "region extrapolada. Un momento por encima de 50% es salida "
+                        "del modelo de cola, no lectura del mercado.")
+            pub = d["publishable"]
+            st.dataframe(pd.DataFrame([
+                {"momento": "media",     "extrapolado": f"{d['share_extrap_m1']*100:5.1f}%", "publicable": pub["mean"]},
+                {"momento": "desviacion","extrapolado": f"{d['share_extrap_m2']*100:5.1f}%", "publicable": pub["sd"]},
+                {"momento": "sesgo",     "extrapolado": f"{d['share_extrap_m3']*100:5.1f}%", "publicable": pub["skew"]},
+                {"momento": "curtosis",  "extrapolado": f"{d['share_extrap_m4']*100:5.1f}%", "publicable": pub["kurtosis"]},
+            ]), hide_index=True, width="stretch")
+
+            st.caption(
+                f"Cobertura de strikes observada: {d['sigma_obs_low']:.1f} a "
+                f"{d['sigma_obs_high']:+.1f} sigmas. "
+                f"Masa en cola extrapolada: {d['mass_tail_left']*100:.2f}% izquierda, "
+                f"{d['mass_tail_right']*100:.2f}% derecha. "
+                f"Pendientes de ala (cota de Lee, 2): {d['beta_L']:.3f} y {d['beta_R']:.3f}."
+            )
+            if d.get("parity_slope") is not None:
+                st.caption(
+                    f"Consistencia de cotizaciones: la pendiente de C-P contra K es "
+                    f"{d['parity_slope']:.4f} y deberia ser exactamente -1. "
+                    f"El forward por regresion se separa {d['forward_gap_bp']:+.1f} pb "
+                    f"del forward por cruce. Es el piso de ruido del dato, no error de metodo."
+                )
+            st.caption(rnd_diag.get("nota", ""))
+
+    # ─── Panel de Gamma Exposure ─────────────────────────────────────────────
+    # No se sobrepone al cono. El cono muestra la distribucion de probabilidad
+    # como extension del precio; el GEX vive en strikes discretos y va en su
+    # propia grafica sobre el mismo eje de precio. Son objetos distintos.
+    try:
+        from modules import gex_panel as _gp
+        from modules import time_clock as _tc
+        _sel = _gp.pick_expiries(available_expiries if available_expiries else [expiry_str],
+                                 valuation_date, selected=expiry_str)
+        _chains, _Ts, _fits, _fwds = {}, {}, {}, {}
+        _ahora = pd.Timestamp.now(tz="America/New_York")
+        for _etiq, _exp in _sel.items():
+            try:
+                _df = cached_options(ticker, str(_exp.date()))
+            except Exception:
+                continue
+            if _df is None or _df.empty:
+                continue
+            _tk = _tc.time_to_expiry(_ahora, _exp)
+            if _tk["expired"]:
+                continue
+            _chains[_etiq] = _df
+            _Ts[_etiq] = _tk["T"]
+            try:
+                _r = rnd_bridge.to_rnd_frame(_df)
+                _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
+                if _res:
+                    _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
+                    _fits[_etiq] = (_sm or {}).get("svi")
+                    _fwds[_etiq] = _res["forward"]
+            except Exception:
+                pass
+        if _chains:
+            _gp.render(_chains, spot, ticker, _Ts, valuation_date,
+                       svi_fits=_fits, forwards=_fwds)
+        else:
+            st.info("No hay cadenas utilizables para el panel de Gamma Exposure.")
+    except Exception as _e:
+        st.warning(f"El panel de Gamma Exposure no se pudo construir: {_e}")
 
     # ─── Density heatmap toggle — centered, elegant, prominent ───
     # The heatmap is the headline feature of the visualization (it's what

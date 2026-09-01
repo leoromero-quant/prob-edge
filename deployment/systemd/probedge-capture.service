@@ -1,0 +1,9 @@
+[Unit]
+Description=Prob-Edge, captura cruda de cadenas de opciones
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/leo/Documents/Claude/Projects/Prob-Edge
+ExecStart=/home/leo/Documents/Claude/Projects/Prob-Edge/.venv/bin/python scripts/capture_raw_chains.py

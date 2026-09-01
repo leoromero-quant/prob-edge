@@ -1,0 +1,9 @@
+[Unit]
+Description=Captura diaria de cadenas, dias habiles despues del cierre
+
+[Timer]
+OnCalendar=Mon..Fri 15:15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

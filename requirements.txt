@@ -45,3 +45,10 @@ email-validator>=2.1
 # LLM (skew interpretation, fundamentales analysis)
 anthropic>=0.40
 
+
+# Calendario de bolsa: feriados y cierres tempranos reales. Sin el, time_clock
+# cae a un respaldo de dias habiles menos feriados conocidos y lo declara.
+pandas_market_calendars>=4.4
+
+# Ruta viva de dxFeed. Estaba en el venv sin declarar desde agosto.
+websockets>=12.0

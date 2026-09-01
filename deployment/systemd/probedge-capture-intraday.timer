@@ -1,0 +1,13 @@
+[Unit]
+Description=Captura intradia cada 15 minutos durante la sesion
+
+[Timer]
+# Medido el 1 de septiembre de 2026 con mercado abierto: 2.7 minutos para los 32
+# simbolos con los 7 vencimientos. Cabe de sobra en 15 minutos. Si llegara a
+# saturar, subir a :00,:30 o a la hora en punto.
+OnCalendar=Mon..Fri *:00/15
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
