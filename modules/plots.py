@@ -50,6 +50,47 @@ def compute_quantile_bands(price_grid: np.ndarray, density: np.ndarray):
 
     return q2p5, q16, q50, q84, q97p5
 
+# Geometria de la lamina. El apilado de etiquetas necesita saber cuantos
+# pixeles utiles tiene el eje de precio para convertir precio en pixel.
+ALTO_FIG = 760
+MARGEN_V_FIG = 100
+
+
+def apilar_etiquetas(notas: list, y_lo: float, y_hi: float,
+                     alto_util: float = ALTO_FIG - MARGEN_V_FIG,
+                     sep: float | None = None) -> list:
+    """
+    Separa verticalmente las etiquetas que comparten columna.
+
+    Todas las referencias de la lamina viven en la misma columna, a la derecha
+    de la linea de vencimiento y justificadas a la izquierda: cuantiles del
+    cono, PoP por strike, muros, gamma flip y max pain. Puestas en el mismo
+    lugar sin separacion se tapan entre si, y el problema no es cosmetico: una
+    etiqueta encimada no se lee y el nivel se pierde.
+
+    Se agrupa por columna (por el valor de x) y dentro de cada columna se
+    empuja hacia arriba lo que quede a menos de una altura de linea de lo
+    anterior. Requiere que el eje de precio tenga rango explicito, porque de
+    otro modo la conversion de precio a pixel no es exacta.
+    """
+    if not notas or y_hi <= y_lo:
+        return notas
+    if sep is None:
+        sep = float(TH.ANNOT) * 1.75
+    columnas = {}
+    for n in notas:
+        columnas.setdefault(str(n.get("x")), []).append(n)
+    for grupo in columnas.values():
+        grupo.sort(key=lambda n: float(n["y"]))
+        ocupado = -1e9
+        for n in grupo:
+            px = (float(n["y"]) - y_lo) / (y_hi - y_lo) * alto_util
+            desplazo = max(0.0, ocupado + sep - px)
+            ocupado = px + desplazo
+            n["yshift"] = n.get("yshift", 0) + desplazo
+    return notas
+
+
 def plot_main_figure(
     quotes_df: pd.DataFrame,
     dates_all: np.ndarray,
@@ -72,6 +113,10 @@ def plot_main_figure(
     """
 
     valuation_date = pd.Timestamp(valuation_date)
+
+    # Todas las referencias que van a la derecha de la linea de
+    # vencimiento se juntan aqui y se apilan al final, en una sola pasada.
+    notas_col: list[dict] = []
 
     # Eje X y máscaras pasado/futuro
     x_vals = pd.to_datetime(dates_all)
@@ -346,21 +391,24 @@ def plot_main_figure(
                     text = f"med ${float(y_val):,.2f}"
                 else:
                     text = f"{prob_lbl}{arrow} ${float(y_val):,.2f}"
-                fig.add_annotation(
+                # A la derecha de la linea de vencimiento y justificado a la
+                # izquierda, en la misma columna que los muros de GEX.
+                notas_col.append(dict(
                     x=x_term,
                     y=float(y_val),
                     xref="x",
                     yref="y",
-                    xanchor="right",
+                    xanchor="left",
                     yanchor="middle",
-                    xshift=-4,
+                    xshift=6,
                     text=text,
                     showarrow=False,
-                    font=dict(color=color, size=TH.ANNOT, family="JetBrains Mono, Consolas, monospace"),
+                    font=dict(color=color, size=TH.ANNOT,
+                              family="JetBrains Mono, Consolas, monospace"),
                     bgcolor="rgba(0,0,0,0.55)",
                     borderpad=2,
                     opacity=0.95,
-                )
+                ))
 
             # Strikes de máxima densidad al vencimiento + PoP risk-neutral.
             # Los rows brillantes del heatmap suelen alinear con strikes reales del
@@ -409,14 +457,14 @@ def plot_main_figure(
                             color = "#00ffc8"
                         else:
                             color = "#ff5a82"
-                        fig.add_annotation(
+                        notas_col.append(dict(
                             x=x_term,
                             y=K,
                             xref="x",
                             yref="y",
-                            xanchor="right",
+                            xanchor="left",
                             yanchor="middle",
-                            xshift=-4,
+                            xshift=6,
                             text=f"${K:,.2f} · PoP {pop:.0f}%",
                             font=dict(color=color, size=TH.ANNOT,
                                       family="JetBrains Mono, Consolas, monospace"),
@@ -424,7 +472,7 @@ def plot_main_figure(
                             bgcolor="rgba(0,0,0,0.50)",
                             borderpad=2,
                             opacity=0.92,
-                        )
+                        ))
 
 
     # -------------------------------------------------
@@ -475,17 +523,21 @@ def plot_main_figure(
         _x0 = pd.Timestamp(pd.to_datetime(quotes_df["Date"]).min())
         _x1 = pd.Timestamp(max(pd.Timestamp(d) for d in expiry_dates)) \
             if len(expiry_dates) else pd.Timestamp(dates_all[-1])
-        _trazas, _notas = overlay_cono(
+        _trazas, _notas, _lineas = overlay_cono(
             gex_capas, _x0, _x1,
             y_lo=y_min_shapes, y_hi=y_max_shapes)
         for _t in _trazas:
             fig.add_trace(_t)
-        for _n in _notas:
-            fig.add_annotation(**_n)
-        # Holgura a la derecha del ultimo vencimiento para que las etiquetas de
-        # muro, ancladas en la linea, no queden cortadas contra el borde.
+        for _l in _lineas:
+            fig.add_shape(**_l)
+        notas_col.extend(_notas)
+        # Holgura a la derecha del ultimo vencimiento para que la columna de
+        # etiquetas, anclada en la linea, no quede cortada contra el borde.
         if _trazas:
-            _pad = (_x1 - _x0) * 0.09
+            # La columna de etiquetas se ancla en la linea y crece hacia la
+            # derecha. Sin holgura, el texto se sale del area de trazado y
+            # choca con los numeros del eje de precio, que vive a la derecha.
+            _pad = (_x1 - _x0) * 0.20
             fig.update_xaxes(range=[_x0, _x1 + _pad])
 
     # -------------------------------------------------
@@ -522,7 +574,7 @@ def plot_main_figure(
             borderwidth=1,
             font=dict(color="#aaaaaa", size=TH.LEGEND),
         ),
-        margin=dict(l=30, r=70, t=50, b=50),
+        margin=dict(l=30, r=95, t=50, b=50),
         height=760,
     )
 
@@ -560,6 +612,20 @@ def plot_main_figure(
         title_font=dict(color="#aaaaaa", size=TH.AXIS_TITLE),
         title_standoff=12,
     )
+
+    # ─── Columna de referencias a la derecha del vencimiento ────────────────
+    # El rango de precio se fija de forma explicita porque el apilado convierte
+    # precio en pixel y con autorango esa conversion no es exacta. Se toma la
+    # union de la malla de densidad y de las velas de la ventana, mas 1% de
+    # holgura, que es practicamente lo que el autorango elegia.
+    _cand = quotes_win[["Low", "High"]].to_numpy(dtype=float)
+    _y0 = float(np.nanmin([np.nanmin(price_grid), np.nanmin(_cand)]))
+    _y1 = float(np.nanmax([np.nanmax(price_grid), np.nanmax(_cand)]))
+    _pad_y = (_y1 - _y0) * 0.01
+    _y0, _y1 = _y0 - _pad_y, _y1 + _pad_y
+    fig.update_yaxes(range=[_y0, _y1])
+    for _n in apilar_etiquetas(notas_col, _y0, _y1):
+        fig.add_annotation(**_n)
 
     st.plotly_chart(fig, width="stretch")
     return fig

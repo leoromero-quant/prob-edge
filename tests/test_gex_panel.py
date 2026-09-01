@@ -159,7 +159,7 @@ def test_las_barras_crecen_hacia_atras_desde_el_vencimiento():
     from modules import gex_panel as GP
     x0, xe = pd.Timestamp("2026-06-01"), pd.Timestamp("2026-10-16")
     capas = [{"etiqueta": "45d", "tabla": _tabla_sintetica(), "x_exp": xe, "niveles": {}}]
-    trazas, _ = GP.overlay_cono(capas, x0, xe, y_lo=700, y_hi=820)
+    trazas, _, _ = GP.overlay_cono(capas, x0, xe, y_lo=700, y_hi=820)
     assert len(trazas) == 2, "una traza de calls y una de puts"
     for tr in trazas:
         fin = pd.DatetimeIndex(tr.base) + pd.to_timedelta(tr.x, unit="ms")
@@ -182,7 +182,7 @@ def test_la_escala_es_normalizada_por_vencimiento():
     xa, xb = pd.Timestamp("2026-09-15"), pd.Timestamp("2026-10-16")
     capas = [{"etiqueta": "a", "tabla": grande, "x_exp": xa, "niveles": {}},
              {"etiqueta": "b", "tabla": chica, "x_exp": xb, "niveles": {}}]
-    trazas, _ = GP.overlay_cono(capas, x0, xb, y_lo=700, y_hi=820)
+    trazas, _, _ = GP.overlay_cono(capas, x0, xb, y_lo=700, y_hi=820)
     largos = {}
     for tr in trazas:
         etiq = "a" if "a ·" in tr.hovertemplate else "b"
@@ -205,22 +205,55 @@ def test_no_se_dibuja_un_vencimiento_ya_liquidado():
     t["gex_net"] = t["gex_C"] - t["gex_P"]
     capas = [{"etiqueta": "0DTE", "tabla": t,
               "x_exp": pd.Timestamp("2026-09-01"), "niveles": {}}]
-    trazas, _ = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"),
-                                pd.Timestamp("2026-09-01"), y_lo=700, y_hi=820)
+    trazas, _, _ = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"),
+                                   pd.Timestamp("2026-09-01"), y_lo=700, y_hi=820)
     assert trazas == []
 
 
-def test_las_etiquetas_de_muro_se_separan_cuando_caen_juntas():
+def test_los_cuatro_niveles_llegan_como_etiqueta_y_como_linea():
+    """
+    Muros, gamma flip y max pain se dibujan como etiqueta a la derecha de la
+    linea de vencimiento y como segmento horizontal sobre el ancho de las
+    barras, para que el nivel se lea contra la densidad.
+    """
     import pandas as pd
     from modules import gex_panel as GP
     xe = pd.Timestamp("2026-09-02")
     capas = [{"etiqueta": "1d", "tabla": _tabla_sintetica(), "x_exp": xe,
-              "niveles": {"call_wall": 767.0, "put_wall": 766.0}}]
-    _, notas = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xe,
-                               y_lo=700, y_hi=820)
-    assert len(notas) == 2
-    desp = sorted(n["yshift"] for n in notas)
-    assert desp[0] < 0 < desp[1], "los dos muros quedaron en la misma altura"
+              "niveles": {"call_wall": 767.0, "put_wall": 750.0,
+                          "gamma_flip": 761.25, "max_pain": 758.0}}]
+    _, notas, lineas = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xe,
+                                       y_lo=700, y_hi=820)
+    assert len(notas) == 4 and len(lineas) == 4
+    textos = " ".join(n["text"] for n in notas)
+    for termino in ("call wall", "put wall", "gamma flip", "max pain"):
+        assert termino in textos
+    assert all(n["xanchor"] == "left" and n["xshift"] > 0 for n in notas), \
+        "la columna va a la derecha de la linea y justificada a la izquierda"
+    assert all(ln["x1"] == xe and ln["x0"] < xe for ln in lineas)
+    # el flip se reporta con dos decimales, es un cruce interpolado
+    assert any("gamma flip 761.25" in n["text"] for n in notas)
+
+
+def test_el_apilado_separa_lo_que_comparte_columna():
+    from modules.plots import apilar_etiquetas
+    from modules import theme as TH
+    y_lo, y_hi, alto = 700.0, 820.0, 660.0
+    notas = [dict(x="2026-09-02", y=y, text=str(y)) for y in (760.0, 760.4, 761.0)]
+    apilar_etiquetas(notas, y_lo, y_hi, alto_util=alto)
+    pos = sorted((float(n["y"]) - y_lo) / (y_hi - y_lo) * alto + n["yshift"]
+                 for n in notas)
+    seps = [b - a for a, b in zip(pos, pos[1:])]
+    assert all(sp >= TH.ANNOT for sp in seps), f"etiquetas encimadas: {seps}"
+
+
+def test_el_apilado_no_mezcla_columnas():
+    from modules.plots import apilar_etiquetas
+    notas = [dict(x="2026-09-02", y=760.0, text="a"),
+             dict(x="2026-10-16", y=760.0, text="b")]
+    apilar_etiquetas(notas, 700.0, 820.0)
+    assert all(n["yshift"] == 0 for n in notas), \
+        "dos vencimientos distintos no comparten columna"
 
 
 def test_capas_overlay_recorta_a_la_banda_del_spot():

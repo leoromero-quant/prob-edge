@@ -1015,7 +1015,9 @@ def render_densidades(ticker: str):
             _niv = {}
             for _, _f in _gex_pan["filas"].iterrows():
                 _niv[_f["plazo"]] = {"call_wall": _f["call_wall"],
-                                     "put_wall": _f["put_wall"]}
+                                     "put_wall": _f["put_wall"],
+                                     "gamma_flip": _f["flip"],
+                                     "max_pain": _f["max_pain"]}
             _gex_capas = _gp.capas_overlay(_gex_pan["tablas"], _gex_exps,
                                            niveles=_niv, spot=spot)
     except Exception as _e:

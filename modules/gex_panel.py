@@ -379,7 +379,8 @@ def capas_overlay(tablas: dict, expiraciones: dict, niveles: dict | None = None,
 
     `tablas` es {etiqueta: DataFrame de gex por strike} (la salida de `compute`),
     `expiraciones` es {etiqueta: fecha de vencimiento} y `niveles` es
-    {etiqueta: {call_wall, put_wall}} para las etiquetas directas.
+    {etiqueta: {call_wall, put_wall, gamma_flip, max_pain}} para las
+    referencias que se dibujan sobre la lamina.
     """
     capas = []
     for etiq, tab in (tablas or {}).items():
@@ -399,7 +400,9 @@ def capas_overlay(tablas: dict, expiraciones: dict, niveles: dict | None = None,
 def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
                  frac: float = FRAC_ANCHO, alfa: float = ALFA_MURO):
     """
-    Devuelve (trazas, anotaciones) para superponer los muros de GEX al cono.
+    Devuelve (trazas, anotaciones, lineas) para superponer los muros de GEX al
+    cono. Las lineas son los niveles de referencia del vencimiento: los dos
+    muros, el gamma flip y el max pain.
 
     Funcion pura de Plotly: no toca Streamlit ni la figura, para poder probar la
     geometria sin levantar la aplicacion.
@@ -410,10 +413,10 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
     """
     import plotly.graph_objects as go
 
-    trazas, notas = [], []
+    trazas, notas, lineas = [], [], []
     x0, x1 = pd.Timestamp(x_ini), pd.Timestamp(x_fin)
     if x1 <= x0:
-        return trazas, notas
+        return trazas, notas, lineas
     largo_max = (x1 - x0) * float(frac)
 
     primera = True
@@ -474,30 +477,36 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
         # Etiquetas directas de los dos muros, ancladas en la linea del
         # vencimiento. Es lo que permite comparar el muro con la densidad sin
         # abrir otra grafica.
-        muros = []
-        for nombre, clave, col in (("call wall", "call_wall", C["call"]),
-                                   ("put wall", "put_wall", C["put"])):
+        # Referencias del vencimiento. Van con etiqueta a la derecha de la linea
+        # y con un segmento horizontal que abarca el ancho de las barras, para
+        # que el nivel se lea contra la densidad y no solo contra el eje.
+        for nombre, clave, col, trazo in (
+                ("call wall", "call_wall", C["call"], "dash"),
+                ("put wall",  "put_wall",  C["put"],  "dash"),
+                ("gamma flip", "gamma_flip", C["flip"], "dot"),
+                ("max pain",  "max_pain",  C["net"],  "dot")):
             v = (capa.get("niveles") or {}).get(clave)
-            if v is None or not np.isfinite(float(v)):
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
                 continue
-            if y_lo is not None and not (y_lo <= float(v) <= y_hi):
+            if not np.isfinite(v):
                 continue
-            muros.append((nombre, float(v), col))
-        # Cuando los dos muros caen juntos (pasa a 0DTE, donde call y put wall
-        # pueden estar a un strike de distancia) las etiquetas se encimaban. Se
-        # separan una arriba y otra abajo del ancla.
-        junta = (len(muros) == 2 and y_lo is not None and y_hi is not None
-                 and abs(muros[0][1] - muros[1][1]) < 0.04 * (y_hi - y_lo))
-        for i, (nombre, v, col) in enumerate(muros):
-            desplazo = 0
-            if junta:
-                desplazo = (TH.ANNOT + 4) if v >= muros[1 - i][1] else -(TH.ANNOT + 4)
+            if y_lo is not None and not (y_lo <= v <= y_hi):
+                continue
+            texto = f"{nombre} {v:,.2f}" if clave == "gamma_flip" else f"{nombre} {v:,.0f}"
             notas.append(dict(
                 x=x_exp, y=v, xref="x", yref="y",
-                text=f"{nombre} {v:,.0f}", showarrow=False,
-                xanchor="left", yanchor="middle", xshift=6, yshift=desplazo,
+                text=texto, showarrow=False,
+                xanchor="left", yanchor="middle", xshift=6,
                 font=dict(color=col, size=TH.ANNOT),
                 bgcolor="rgba(0,0,0,0.75)", borderpad=2,
             ))
+            lineas.append(dict(
+                type="line", xref="x", yref="y",
+                x0=x_exp - techo, x1=x_exp, y0=v, y1=v,
+                line=dict(color=_rgba(col, 0.75), width=1.2, dash=trazo),
+                layer="above",
+            ))
 
-    return trazas, notas
+    return trazas, notas, lineas
