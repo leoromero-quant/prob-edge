@@ -59,11 +59,16 @@ def plot_main_figure(
     valuation_date: pd.Timestamp,
     show_heatmap: bool = True,
     show_past_rnd: bool = False,
+    gex_capas: list | None = None,
 ):
     """
     Figura principal: OHLC + cono RND (68/95%) + mediana +
     opcionalmente heatmap y bandas RND históricas.
     Bloomberg/tastytrade ultra-dark theme.
+
+    `gex_capas` cuelga los muros de Gamma Exposure de la línea vertical de cada
+    vencimiento, en la misma escala de precio que la densidad. Ver
+    `modules.gex_panel.overlay_cono` para la geometría y el porqué.
     """
 
     valuation_date = pd.Timestamp(valuation_date)
@@ -460,10 +465,36 @@ def plot_main_figure(
         )
 
     # -------------------------------------------------
+    # 4b) Muros de Gamma Exposure colgados de cada vencimiento
+    # -------------------------------------------------
+    # Van despues de las lineas de vencimiento para quedar por encima del
+    # heatmap y por debajo de nada mas: son una capa de contexto, no el sujeto
+    # de la lamina.
+    if gex_capas:
+        from .gex_panel import overlay_cono
+        _x0 = pd.Timestamp(pd.to_datetime(quotes_df["Date"]).min())
+        _x1 = pd.Timestamp(max(pd.Timestamp(d) for d in expiry_dates)) \
+            if len(expiry_dates) else pd.Timestamp(dates_all[-1])
+        _trazas, _notas = overlay_cono(
+            gex_capas, _x0, _x1,
+            y_lo=y_min_shapes, y_hi=y_max_shapes)
+        for _t in _trazas:
+            fig.add_trace(_t)
+        for _n in _notas:
+            fig.add_annotation(**_n)
+        # Holgura a la derecha del ultimo vencimiento para que las etiquetas de
+        # muro, ancladas en la linea, no queden cortadas contra el borde.
+        if _trazas:
+            _pad = (_x1 - _x0) * 0.09
+            fig.update_xaxes(range=[_x0, _x1 + _pad])
+
+    # -------------------------------------------------
     # 5) Estética general — Bloomberg/tastytrade ultra dark
     # -------------------------------------------------
     fig.update_layout(
         template=None,
+        barmode="overlay",
+        bargap=0,
         paper_bgcolor="#000000",
         plot_bgcolor="#000000",
         xaxis_title="Date",

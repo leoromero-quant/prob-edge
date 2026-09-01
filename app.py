@@ -976,10 +976,56 @@ def render_densidades(ticker: str):
                     horizontal=True,
                 )
 
+    # ─── Muros de GEX para colgar del cono ───────────────────────────────────
+    # Se calculan ANTES de la grafica porque la lamina los necesita. El panel de
+    # detalle mas abajo reutiliza este mismo resultado en vez de recalcularlo.
+    _gp = _tc = None
+    _gex_chains, _gex_Ts, _gex_fits, _gex_fwds = {}, {}, {}, {}
+    _gex_pan, _gex_capas, _gex_exps = None, None, {}
+    try:
+        from modules import gex_panel as _gp
+        from modules import time_clock as _tc
+        _sel = _gp.pick_expiries(available_expiries if available_expiries else [expiry_str],
+                                 valuation_date, selected=expiry_str)
+        _ahora = pd.Timestamp.now(tz="America/New_York")
+        for _etiq, _exp in _sel.items():
+            try:
+                _df = cached_options(ticker, str(_exp.date()))
+            except Exception:
+                continue
+            if _df is None or _df.empty:
+                continue
+            _tk = _tc.time_to_expiry(_ahora, _exp)
+            if _tk["expired"]:
+                continue
+            _gex_chains[_etiq] = _df
+            _gex_Ts[_etiq] = _tk["T"]
+            _gex_exps[_etiq] = _exp
+            try:
+                _r = rnd_bridge.to_rnd_frame(_df)
+                _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
+                if _res:
+                    _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
+                    _gex_fits[_etiq] = (_sm or {}).get("svi")
+                    _gex_fwds[_etiq] = _res["forward"]
+            except Exception:
+                pass
+        if _gex_chains:
+            _gex_pan = _gp.compute(_gex_chains, spot, ticker, _gex_Ts)
+            _niv = {}
+            for _, _f in _gex_pan["filas"].iterrows():
+                _niv[_f["plazo"]] = {"call_wall": _f["call_wall"],
+                                     "put_wall": _f["put_wall"]}
+            _gex_capas = _gp.capas_overlay(_gex_pan["tablas"], _gex_exps,
+                                           niveles=_niv, spot=spot)
+    except Exception as _e:
+        st.caption(f"Muros de GEX no disponibles en el cono: {_e}")
+
     plot_main_figure(
         quotes_df, dates_win, price_grid, density_win,
         expiry_dates=expiry_dates_win, valuation_date=valuation_date,
         show_heatmap=show_heatmap,
+        gex_capas=_gex_capas,
     )
 
     # ─── Diagnosticos del motor de densidad ──────────────────────────────────
@@ -1048,40 +1094,14 @@ def render_densidades(ticker: str):
             st.caption(rnd_diag.get("nota", ""))
 
     # ─── Panel de Gamma Exposure ─────────────────────────────────────────────
-    # No se sobrepone al cono. El cono muestra la distribucion de probabilidad
-    # como extension del precio; el GEX vive en strikes discretos y va en su
-    # propia grafica sobre el mismo eje de precio. Son objetos distintos.
+    # El detalle por strike, con el eje de GEX en millones y los niveles
+    # numericos. Los muros ya se vieron colgados del cono; aqui se leen las
+    # magnitudes. Son la misma tabla vista con dos propositos distintos.
     try:
-        from modules import gex_panel as _gp
-        from modules import time_clock as _tc
-        _sel = _gp.pick_expiries(available_expiries if available_expiries else [expiry_str],
-                                 valuation_date, selected=expiry_str)
-        _chains, _Ts, _fits, _fwds = {}, {}, {}, {}
-        _ahora = pd.Timestamp.now(tz="America/New_York")
-        for _etiq, _exp in _sel.items():
-            try:
-                _df = cached_options(ticker, str(_exp.date()))
-            except Exception:
-                continue
-            if _df is None or _df.empty:
-                continue
-            _tk = _tc.time_to_expiry(_ahora, _exp)
-            if _tk["expired"]:
-                continue
-            _chains[_etiq] = _df
-            _Ts[_etiq] = _tk["T"]
-            try:
-                _r = rnd_bridge.to_rnd_frame(_df)
-                _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
-                if _res:
-                    _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
-                    _fits[_etiq] = (_sm or {}).get("svi")
-                    _fwds[_etiq] = _res["forward"]
-            except Exception:
-                pass
-        if _chains:
-            _gp.render(_chains, spot, ticker, _Ts, valuation_date,
-                       svi_fits=_fits, forwards=_fwds)
+        if _gex_chains:
+            _gp.render(_gex_chains, spot, ticker, _gex_Ts, valuation_date,
+                       svi_fits=_gex_fits, forwards=_gex_fwds,
+                       pan_previo=_gex_pan)
         else:
             st.info("No hay cadenas utilizables para el panel de Gamma Exposure.")
     except Exception as _e:

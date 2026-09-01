@@ -202,10 +202,16 @@ def figure_gex(tabla: pd.DataFrame, spot: float, niveles: dict, titulo: str,
 
 
 def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
-           svi_fits: dict | None = None, forwards: dict | None = None):
+           svi_fits: dict | None = None, forwards: dict | None = None,
+           pan_previo: dict | None = None):
     """
     Dibuja el panel en Streamlit. Se separa de `compute` para que el calculo se
     pueda probar sin levantar la aplicacion.
+
+    `pan_previo` es el panel de referencia que la aplicacion ya calculo para
+    colgar los muros del cono. Con el interruptor de sonrisa apagado el
+    resultado es el mismo objeto, asi que se reutiliza en vez de repetir el
+    reprecio de la cadena completa sobre la banda de spots.
     """
     import streamlit as st
     from . import gex as G
@@ -230,9 +236,12 @@ def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
                   "opciones de indice, peor que no corregir. Se ofrece para "
                   "comparar, no como recomendacion."))
 
-    pan = compute(chains, spot, symbol, Ts, smile_adjusted=ajustado,
-                  svi_fits=svi_fits, forwards=forwards,
-                  regime=regimen if ajustado else "sticky_strike")
+    if not ajustado and pan_previo is not None:
+        pan = pan_previo
+    else:
+        pan = compute(chains, spot, symbol, Ts, smile_adjusted=ajustado,
+                      svi_fits=svi_fits, forwards=forwards,
+                      regime=regimen if ajustado else "sticky_strike")
     filas = pan["filas"]
     if filas.empty:
         st.info("No hay cadena suficiente para calcular GEX en estos vencimientos.")
@@ -323,3 +332,172 @@ def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
         "magnitud sirve como indicador relativo entre strikes y entre dias, no "
         "como cifra absoluta de dinero a operar."
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Muros de GEX sobre el cono
+# ─────────────────────────────────────────────────────────────────────────────
+# El cono tiene precio en el eje vertical y fecha en el horizontal, asi que la
+# linea vertical de un vencimiento es un eje de precio completo. Colgar de ella
+# el histograma de GEX pone los muros y la densidad en la MISMA escala de
+# precio, que es la comparacion que interesa: la densidad dice que tan probable
+# es cada precio, el muro dice quien tiene que operar si el precio llega ahi.
+#
+# Escala: normalizada por vencimiento. El gamma de 0DTE es ordenes de magnitud
+# mayor que el de 45 dias, asi que una escala comun borraria el plazo largo. Lo
+# que se compara aqui es la FORMA del posicionamiento; la magnitud en millones
+# vive en el tooltip, en las metricas y en la tabla.
+#
+# Forma: las barras crecen hacia atras desde la linea de vencimiento, con calls
+# y puts apilados. No invaden el espacio a la derecha del vencimiento, donde no
+# hay nada que representar.
+
+# Fraccion del ancho total de la lamina que ocupa el muro mas grande de cada
+# vencimiento. Por encima de 0.12 las barras empiezan a tapar el cono.
+FRAC_ANCHO = 0.10
+
+# Opacidad de las barras. Suficiente para leerlas sobre el heatmap de densidad
+# sin borrarlo.
+ALFA_MURO = 0.55
+
+# Barras por debajo de esta fraccion del muro mayor no se dibujan. Con el
+# vencimiento ya pasado el gamma colapsa a cero y lo que queda es ruido
+# numerico: sin este piso se dibujaba una sola barra espuria.
+PISO_RELATIVO = 0.01
+
+
+def _rgba(hex_color: str, alfa: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alfa:.3f})"
+
+
+def capas_overlay(tablas: dict, expiraciones: dict, niveles: dict | None = None,
+                  banda: float = 0.10, spot: float | None = None) -> list[dict]:
+    """
+    Arma la lista de capas que consume `overlay_cono`, una por vencimiento.
+
+    `tablas` es {etiqueta: DataFrame de gex por strike} (la salida de `compute`),
+    `expiraciones` es {etiqueta: fecha de vencimiento} y `niveles` es
+    {etiqueta: {call_wall, put_wall}} para las etiquetas directas.
+    """
+    capas = []
+    for etiq, tab in (tablas or {}).items():
+        exp = (expiraciones or {}).get(etiq)
+        if tab is None or exp is None or not len(tab):
+            continue
+        t = tab
+        if spot:
+            t = t[(t.index >= spot * (1 - banda)) & (t.index <= spot * (1 + banda))]
+        if not len(t):
+            continue
+        capas.append({"etiqueta": etiq, "tabla": t, "x_exp": exp,
+                      "niveles": (niveles or {}).get(etiq, {})})
+    return capas
+
+
+def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
+                 frac: float = FRAC_ANCHO, alfa: float = ALFA_MURO):
+    """
+    Devuelve (trazas, anotaciones) para superponer los muros de GEX al cono.
+
+    Funcion pura de Plotly: no toca Streamlit ni la figura, para poder probar la
+    geometria sin levantar la aplicacion.
+
+    La longitud de cada barra se expresa en milisegundos sobre un eje de fechas,
+    que es el mismo mecanismo con el que se dibuja un diagrama de Gantt: `base`
+    marca donde empieza y el valor marca cuanto dura.
+    """
+    import plotly.graph_objects as go
+
+    trazas, notas = [], []
+    x0, x1 = pd.Timestamp(x_ini), pd.Timestamp(x_fin)
+    if x1 <= x0:
+        return trazas, notas
+    largo_max = (x1 - x0) * float(frac)
+
+    primera = True
+    for capa in capas:
+        t, x_exp = capa["tabla"], pd.Timestamp(capa["x_exp"])
+        if t is None or not len(t):
+            continue
+        if y_lo is not None and y_hi is not None:
+            t = t[(t.index >= y_lo) & (t.index <= y_hi)]
+        if not len(t):
+            continue
+
+        K = t.index.to_numpy(dtype=float)
+        c = np.abs(np.nan_to_num(t["gex_C"].to_numpy(dtype=float)))
+        p = np.abs(np.nan_to_num(t["gex_P"].to_numpy(dtype=float)))
+        tot = c + p
+        pico = float(np.max(tot)) if len(K) else 0.0
+        if not np.isfinite(pico) or pico <= 0:
+            continue
+        # Una capa donde una sola barra sobrevive al piso no es un perfil de
+        # posicionamiento, es un vencimiento ya liquidado. No se dibuja.
+        if int((tot > PISO_RELATIVO * pico).sum()) < 3:
+            continue
+        vis = tot > PISO_RELATIVO * pico
+        K, c, p = K[vis], c[vis], p[vis]
+
+        # El muro no puede extenderse mas alla del inicio de la lamina.
+        techo = min(largo_max, (x_exp - x0) * 0.85)
+        if techo <= pd.Timedelta(0):
+            continue
+        ms = techo.total_seconds() * 1000.0 / pico     # milisegundos por USD
+
+        paso = float(np.median(np.diff(K))) if len(K) > 1 else 1.0
+        ancho = paso * 0.85
+
+        lc, lp = c * ms, p * ms
+        # Calls pegados a la linea de vencimiento, puts hacia afuera.
+        base_c = pd.DatetimeIndex([x_exp] * len(K)) - pd.to_timedelta(lc, unit="ms")
+        base_p = base_c - pd.to_timedelta(lp, unit="ms")
+
+        etiq = capa["etiqueta"]
+        for nombre, base, largo, valor, col in (
+                ("calls", base_c, lc, c, C["call"]),
+                ("puts",  base_p, lp, p, C["put"])):
+            trazas.append(go.Bar(
+                y=K, x=largo, base=list(base), orientation="h",
+                width=ancho, offset=-ancho / 2.0,
+                marker=dict(color=_rgba(col, alfa), line=dict(width=0)),
+                name=f"GEX {nombre}", legendgroup=f"gex_{nombre}",
+                showlegend=primera,
+                customdata=valor / 1e6,
+                hovertemplate=("strike %{y:.0f}<br>" + etiq +
+                               " · " + nombre + " %{customdata:,.1f} M"
+                               "<extra></extra>"),
+            ))
+        primera = False
+
+        # Etiquetas directas de los dos muros, ancladas en la linea del
+        # vencimiento. Es lo que permite comparar el muro con la densidad sin
+        # abrir otra grafica.
+        muros = []
+        for nombre, clave, col in (("call wall", "call_wall", C["call"]),
+                                   ("put wall", "put_wall", C["put"])):
+            v = (capa.get("niveles") or {}).get(clave)
+            if v is None or not np.isfinite(float(v)):
+                continue
+            if y_lo is not None and not (y_lo <= float(v) <= y_hi):
+                continue
+            muros.append((nombre, float(v), col))
+        # Cuando los dos muros caen juntos (pasa a 0DTE, donde call y put wall
+        # pueden estar a un strike de distancia) las etiquetas se encimaban. Se
+        # separan una arriba y otra abajo del ancla.
+        junta = (len(muros) == 2 and y_lo is not None and y_hi is not None
+                 and abs(muros[0][1] - muros[1][1]) < 0.04 * (y_hi - y_lo))
+        for i, (nombre, v, col) in enumerate(muros):
+            desplazo = 0
+            if junta:
+                desplazo = (TH.ANNOT + 4) if v >= muros[1 - i][1] else -(TH.ANNOT + 4)
+            notas.append(dict(
+                x=x_exp, y=v, xref="x", yref="y",
+                text=f"{nombre} {v:,.0f}", showarrow=False,
+                xanchor="left", yanchor="middle", xshift=6, yshift=desplazo,
+                font=dict(color=col, size=TH.ANNOT),
+                bgcolor="rgba(0,0,0,0.75)", borderpad=2,
+            ))
+
+    return trazas, notas
