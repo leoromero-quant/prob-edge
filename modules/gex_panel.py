@@ -39,7 +39,14 @@ C = {
     "surf":  "#000000",
 }
 
+from . import theme as TH
+
 DEFAULT_DTE = 45
+
+# Geometria de la figura de GEX. Se declaran aqui porque el apilado de
+# etiquetas necesita saber cuantos pixeles utiles tiene el eje de precio.
+ALTO = 520
+MARGEN_V = 120
 
 
 def pick_expiries(expiries, valuation, selected=None, default_dte: int = DEFAULT_DTE) -> dict:
@@ -146,29 +153,51 @@ def figure_gex(tabla: pd.DataFrame, spot: float, niveles: dict, titulo: str,
     fig.add_trace(go.Scatter(y=t.index, x=t["gex_net"] / 1e6, mode="lines",
                              name="neto", line=dict(color=C["net"], width=2),
                              hovertemplate="strike %{y:.0f}<br>neto %{x:,.1f} M<extra></extra>"))
-    for nombre, val, col, dash in (
-            ("spot", spot, C["spot"], "solid"),
-            ("call wall", niveles.get("call_wall"), C["call"], "dash"),
-            ("put wall", niveles.get("put_wall"), C["put"], "dash"),
-            ("gamma flip", niveles.get("gamma_flip"), C["flip"], "dot"),
-            ("max pain", niveles.get("max_pain"), C["ink2"], "dot")):
-        if val is None or not (lo <= val <= hi):
-            continue
+    # Las etiquetas de nivel se apilan verticalmente cuando dos niveles caen
+    # cerca. A 13 puntos una etiqueta ocupa del orden de 18 pixeles, y en una
+    # banda de +-6% sobre 400 pixeles utiles eso son unos 4 puntos de strike.
+    # Sin separacion, spot y max pain se encimaban y ninguno se leia.
+    niveles_vis = [(n, v, c, d) for n, v, c, d in (
+        ("spot", spot, C["spot"], "solid"),
+        ("call wall", niveles.get("call_wall"), C["call"], "dash"),
+        ("put wall", niveles.get("put_wall"), C["put"], "dash"),
+        ("gamma flip", niveles.get("gamma_flip"), C["flip"], "dot"),
+        ("max pain", niveles.get("max_pain"), C["ink2"], "dot"))
+        if v is not None and lo <= v <= hi]
+    niveles_vis.sort(key=lambda r: r[1])
+    # El eje se fija a [lo, hi] para que la conversion de precio a pixel sea
+    # exacta y el apilado no dependa del relleno automatico de Plotly.
+    alto_util = float(ALTO - MARGEN_V)
+    sep = float(TH.ANNOT) * 2.0          # alto de linea mas holgura
+    ocupado = -1e9
+    for nombre, val, col, dash in niveles_vis:
+        px = (val - lo) / (hi - lo) * alto_util if hi > lo else 0.0
+        desplazo = max(0.0, ocupado + sep - px)
+        ocupado = px + desplazo
         fig.add_hline(y=val, line=dict(color=col, width=1.4, dash=dash),
                       annotation_text=f"{nombre} {val:,.0f}",
                       annotation_position="top right",
-                      annotation_font=dict(color=col, size=10))
+                      annotation_yshift=desplazo,
+                      annotation_bgcolor="rgba(0,0,0,0.75)",
+                      annotation_borderpad=2,
+                      annotation_font=dict(color=col, size=TH.ANNOT))
     fig.update_layout(
-        template="plotly_dark", barmode="relative", bargap=0.15, height=520,
-        title=dict(text=titulo, font=dict(size=13, color=C["ink"])),
+        template="plotly_dark", barmode="relative", bargap=0.15, height=ALTO,
+        title=dict(text=titulo, font=dict(size=TH.SUBTITLE, color=C["ink"])),
         paper_bgcolor=C["surf"], plot_bgcolor=C["surf"],
-        legend=dict(orientation="h", y=-0.12, font=dict(color=C["ink2"])),
-        margin=dict(l=10, r=90, t=50, b=40))
+        legend=dict(orientation="h", y=-0.14,
+                    font=dict(color=C["ink2"], size=TH.LEGEND)),
+        font=TH.layout_font(color=C["ink2"]),
+        hoverlabel=dict(font=dict(size=TH.HOVER)),
+        margin=dict(l=10, r=100, t=60, b=60))
     fig.update_yaxes(title_text="strike", gridcolor=C["grid"], side="right",
-                     tickfont=dict(color=C["ink2"]), title_font=dict(color=C["ink2"]))
+                     range=[lo, hi],
+                     tickfont=dict(color=C["ink2"], size=TH.TICK),
+                     title_font=dict(color=C["ink2"], size=TH.AXIS_TITLE))
     fig.update_xaxes(title_text="millones USD por movimiento de 1%",
                      gridcolor=C["grid"], zeroline=True, zerolinecolor="#444",
-                     tickfont=dict(color=C["ink2"]), title_font=dict(color=C["ink2"]))
+                     tickfont=dict(color=C["ink2"], size=TH.TICK),
+                     title_font=dict(color=C["ink2"], size=TH.AXIS_TITLE))
     return fig
 
 

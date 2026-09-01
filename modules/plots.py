@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from . import theme as TH
+
 
 def compute_quantile_bands(price_grid: np.ndarray, density: np.ndarray):
     """
@@ -311,7 +313,7 @@ def plot_main_figure(
                     ),
                     showarrow=False,
                     align="left",
-                    font=dict(color=skew_color, size=10, family="JetBrains Mono, Consolas, monospace"),
+                    font=dict(color=skew_color, size=TH.ANNOT, family="JetBrains Mono, Consolas, monospace"),
                     bgcolor="rgba(0,0,0,0.65)",
                     bordercolor="#333333",
                     borderwidth=1,
@@ -349,7 +351,7 @@ def plot_main_figure(
                     xshift=-4,
                     text=text,
                     showarrow=False,
-                    font=dict(color=color, size=10, family="JetBrains Mono, Consolas, monospace"),
+                    font=dict(color=color, size=TH.ANNOT, family="JetBrains Mono, Consolas, monospace"),
                     bgcolor="rgba(0,0,0,0.55)",
                     borderpad=2,
                     opacity=0.95,
@@ -411,7 +413,7 @@ def plot_main_figure(
                             yanchor="middle",
                             xshift=-4,
                             text=f"${K:,.2f} · PoP {pop:.0f}%",
-                            font=dict(color=color, size=9,
+                            font=dict(color=color, size=TH.ANNOT,
                                       family="JetBrains Mono, Consolas, monospace"),
                             showarrow=False,
                             bgcolor="rgba(0,0,0,0.50)",
@@ -454,7 +456,7 @@ def plot_main_figure(
             showarrow=False,
             xanchor="left",
             yanchor="bottom",
-            font=dict(color="#ffd700", size=10),
+            font=dict(color="#ffd700", size=TH.ANNOT),
         )
 
     # -------------------------------------------------
@@ -468,18 +470,16 @@ def plot_main_figure(
         yaxis_title="Price / Strike",
         title=dict(
             text="Risk-Neutral Density from Option Prices",
-            font=dict(family="Inter, -apple-system, sans-serif", size=16, color="#dddddd"),
+            font=dict(family="Inter, -apple-system, sans-serif", size=TH.TITLE, color="#dddddd"),
         ),
         hovermode="x unified",
         hoverlabel=dict(
             bgcolor="#1a1a1a",
-            font=dict(color="#ffffff", family="JetBrains Mono, Consolas, monospace"),
+            font=dict(color="#ffffff", size=TH.HOVER,
+                      family="JetBrains Mono, Consolas, monospace"),
             bordercolor="#333333",
         ),
-        font=dict(
-            family="JetBrains Mono, Consolas, monospace",
-            color="#aaaaaa",
-        ),
+        font=TH.layout_font(),
         legend=dict(
             orientation="h",
             yanchor="top",
@@ -489,9 +489,9 @@ def plot_main_figure(
             bgcolor="rgba(0,0,0,0.7)",
             bordercolor="#333333",
             borderwidth=1,
-            font=dict(color="#aaaaaa"),
+            font=dict(color="#aaaaaa", size=TH.LEGEND),
         ),
-        margin=dict(l=30, r=70, t=40, b=40),
+        margin=dict(l=30, r=70, t=50, b=50),
         height=760,
     )
 
@@ -510,8 +510,8 @@ def plot_main_figure(
         gridcolor="#1a1a1a",
         zerolinecolor="#1a1a1a",
         rangeslider_visible=False,
-        tickfont=dict(color="#888888"),
-        title_font=dict(color="#aaaaaa"),
+        tickfont=dict(color="#888888", size=TH.TICK),
+        title_font=dict(color="#aaaaaa", size=TH.AXIS_TITLE),
         rangebreaks=[
             dict(bounds=["sat", "mon"]),
             dict(values=holidays_list),
@@ -525,8 +525,8 @@ def plot_main_figure(
         ticks="inside",
         ticklen=4,
         tickcolor="#333333",
-        tickfont=dict(color="#888888"),
-        title_font=dict(color="#aaaaaa"),
+        tickfont=dict(color="#888888", size=TH.TICK),
+        title_font=dict(color="#aaaaaa", size=TH.AXIS_TITLE),
         title_standoff=12,
     )
 

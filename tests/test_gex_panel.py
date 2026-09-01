@@ -96,3 +96,47 @@ def test_paleta_usa_los_pasos_validados_para_fondo_negro():
     """Fija los hex que pasaron el validador del skill de dataviz."""
     assert P.C["call"] == "#d95926" and P.C["put"] == "#199e70"
     assert P.C["dens"] == "#3987e5" and P.C["surf"] == "#000000"
+
+
+def test_las_etiquetas_de_nivel_no_se_enciman():
+    """
+    Con spot y max pain a tres puntos de distancia las etiquetas se encimaban y
+    ninguna se leia. El apilado debe separarlas al menos una altura de linea.
+    """
+    import numpy as np, pandas as pd
+    from modules import gex_panel as GP, theme as TH
+
+    K = np.arange(700.0, 820.0, 1.0)
+    tabla = pd.DataFrame(
+        {"gex_C": np.linspace(1e6, 5e6, len(K)),
+         "gex_P": np.linspace(5e6, 1e6, len(K))}, index=K)
+    tabla["gex_net"] = tabla["gex_C"] - tabla["gex_P"]
+    spot = 762.0
+    niv = {"call_wall": 775.0, "put_wall": 730.0,
+           "gamma_flip": 783.0, "max_pain": 765.0}
+    fig = GP.figure_gex(tabla, spot, niv, "prueba")
+
+    lo, hi = spot * 0.94, spot * 1.06
+    alto = float(GP.ALTO - GP.MARGEN_V)
+    pos = sorted((v - lo) / (hi - lo) * alto + a.yshift
+                 for a, v in zip(fig.layout.annotations,
+                                 sorted([spot] + list(niv.values()))))
+    seps = np.diff(pos)
+    assert (seps >= TH.ANNOT).all(), f"etiquetas encimadas: {seps}"
+    assert all(a.font.size == TH.ANNOT for a in fig.layout.annotations)
+
+
+def test_la_tipografia_sale_del_tema():
+    import pandas as pd, numpy as np
+    from modules import gex_panel as GP, theme as TH
+    K = np.arange(740.0, 790.0, 1.0)
+    tabla = pd.DataFrame({"gex_C": np.ones(len(K)) * 1e6,
+                          "gex_P": np.ones(len(K)) * 1e6}, index=K)
+    tabla["gex_net"] = 0.0
+    fig = GP.figure_gex(tabla, 762.0, {}, "prueba")
+    L = fig.layout
+    assert L.font.size == TH.BASE
+    assert L.title.font.size == TH.SUBTITLE
+    assert L.legend.font.size == TH.LEGEND
+    assert L.yaxis.tickfont.size == TH.TICK == L.xaxis.tickfont.size
+    assert L.yaxis.title.font.size == TH.AXIS_TITLE
