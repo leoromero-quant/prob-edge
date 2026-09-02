@@ -101,13 +101,58 @@ def cached_quotes(ticker: str, range_code: str, fmp_api_key: str, cache_day: str
     return fmp_quote_history(ticker, fmp_api_key, days=days)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_svi_fit(ticker: str, expiry: str, spot_key: float, T: float):
+    """
+    Ajuste SVI y forward de un vencimiento, cacheados.
+
+    Es lo unico caro que quedaba en cada rerun: medido, la densidad forward mas
+    el ajuste de la sonrisa cuestan del orden de 0.4 s por vencimiento, y se
+    recalculaban al encender el heatmap o al mover la ventana de historia, que
+    no cambian ni la cadena ni el spot.
+
+    La clave lleva el spot redondeado a dos decimales, asi que se recalcula
+    cuando el precio se mueve de verdad y no cuando el usuario toca un control.
+    """
+    from modules import rnd_forward as _rf
+    df = cached_options(ticker, expiry)
+    if df is None or df.empty:
+        return None, None
+    r = rnd_bridge.to_rnd_frame(df)
+    res = _rf.rnd(r, spot_key, T, smile_model="svi")
+    if not res:
+        return None, None
+    sm = _rf.fit_smile(r, res["forward"], model="svi", T=T)
+    return (sm or {}).get("svi"), res["forward"]
+
+
+@st.cache_data(ttl=30)
+def cached_spot(ticker: str) -> dict:
+    """
+    Spot en vivo, cacheado 30 s. Sin cache costaba 1.3 s de WebSocket en CADA
+    rerun de Streamlit, o sea en cada clic de cualquier control de la pagina,
+    incluido encender el heatmap. Treinta segundos es mucho mas fresco que la
+    fuente, que llega diferida quince minutos.
+    """
+    return get_quotes_from_env([ticker])
+
+
 @st.cache_data(ttl=300)
 def cached_expiries(ticker: str):
     tt_token = _get_tt_token()
     return fetch_available_expiries(ticker, tt_token)
 
 
-@st.cache_data(ttl=60)
+# TTL de la cadena. Medido el 2 de septiembre de 2026: cada cadena cuesta 2.3 s
+# de WebSocket a dxFeed. Con TTL de 60 s, cualquier cambio de control despues de
+# un minuto refetcheaba todo, y en modo "todos" son quince cadenas, 35 s de
+# espera. Los 60 s no compraban frescura: la fuente es diferida quince minutos y
+# el interes abierto es del cierre ANTERIOR. Se declara en variable de entorno
+# para poder apretarlo sin tocar codigo.
+TTL_CADENAS = int(os.getenv("PROBEDGE_TTL_CADENAS", "900"))
+
+
+@st.cache_data(ttl=TTL_CADENAS)
 def cached_options(ticker: str, expiry: str):
     tt_token = _get_tt_token()
     df = fetch_options_snapshot(ticker, expiry, tt_token)
@@ -658,7 +703,11 @@ def render_densidades(ticker: str):
         # vista ligera sin tocar codigo: alla cada sesion nueva pagaria las
         # llamadas de red de todos los vencimientos.
         _ALCANCES = ["todos", "0DTE + elegido"]
-        _alc_env = os.getenv("PROBEDGE_GEX_ALCANCE", "todos").strip()
+        # Default ligero. "todos" son quince cadenas y hasta 35 s en la primera
+        # carga de cada sesion; sirve para estudiar la estructura temporal, no
+        # para abrir la pagina. Se sube a "todos" con un clic o con la variable
+        # de entorno.
+        _alc_env = os.getenv("PROBEDGE_GEX_ALCANCE", "0DTE + elegido").strip()
         gex_alcance = st.radio(
             "Muros de GEX",
             options=_ALCANCES,
@@ -736,7 +785,7 @@ def render_densidades(ticker: str):
 
     valuation_date = quotes_df["Date"].max()
     try:
-        spot_q = get_quotes_from_env([ticker])
+        spot_q = cached_spot(ticker)
         if spot_q.get(ticker, {}).get("price"):
             spot = float(spot_q[ticker]["price"])
         else:
@@ -998,16 +1047,16 @@ def render_densidades(ticker: str):
                 # El ajuste SVI solo se necesita para la correccion de sonrisa,
                 # que se aplica al plazo principal. Con dieciseis vencimientos,
                 # calibrarlos todos cuesta segundos y no se usa ninguno salvo
-                # el elegido y el 0DTE.
+                # el elegido y el 0DTE. Ademas va cacheado: no cambia al tocar
+                # un control de la pagina.
                 if _etiq not in ("0DTE",) and _exp != pd.Timestamp(expiry_str).normalize():
                     continue
                 try:
-                    _r = rnd_bridge.to_rnd_frame(_df)
-                    _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
-                    if _res:
-                        _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
-                        _gex_fits[_etiq] = (_sm or {}).get("svi")
-                        _gex_fwds[_etiq] = _res["forward"]
+                    _fit, _fwd = cached_svi_fit(ticker, str(_exp.date()),
+                                                round(float(spot), 2), float(_tk["T"]))
+                    if _fit is not None:
+                        _gex_fits[_etiq] = _fit
+                        _gex_fwds[_etiq] = _fwd
                 except Exception:
                     pass
         if _gex_chains:
