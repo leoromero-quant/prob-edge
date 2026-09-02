@@ -669,6 +669,28 @@ def render_densidades(ticker: str):
                                     max_value=2000, value=365, step=10,
                                     key="dens_past")
 
+        # ── Alcance de los muros de GEX ────────────────────────────────────
+        # "todos" cuelga un histograma de cada vencimiento entre hoy y el
+        # elegido, que es la estructura temporal del posicionamiento: se ve
+        # como se mueve el muro a lo largo del plazo, que es informacion que
+        # una lamina de un solo vencimiento no puede dar. Cuesta una llamada de
+        # red por vencimiento en la primera carga.
+        # El default sale del entorno para poder desplegar en Render con la
+        # vista ligera sin tocar codigo: alla cada sesion nueva pagaria las
+        # llamadas de red de todos los vencimientos.
+        _ALCANCES = ["todos", "0DTE + elegido"]
+        _alc_env = os.getenv("PROBEDGE_GEX_ALCANCE", "todos").strip()
+        gex_alcance = st.radio(
+            "Muros de GEX",
+            options=_ALCANCES,
+            index=_ALCANCES.index(_alc_env) if _alc_env in _ALCANCES else 0,
+            key="gex_alcance",
+            horizontal=True,
+            help=("todos: un histograma por vencimiento hasta el elegido, con "
+                  "el ancho de cada uno limitado por la distancia al anterior. "
+                  "0DTE + elegido: solo dos capas, mas limpio y mas rapido."),
+        )
+
         # ── Interruptor de motor de densidad ───────────────────────────────
         # Default desde el entorno (PROBEDGE_RND), sobreescribible en vivo para
         # poder comparar los dos conos sin reiniciar. `legacy` es el default para
@@ -956,31 +978,43 @@ def render_densidades(ticker: str):
     try:
         from modules import gex_panel as _gp
         from modules import time_clock as _tc
-        _sel = _gp.pick_expiries(available_expiries if available_expiries else [expiry_str],
-                                 valuation_date, selected=expiry_str)
+        _fuente_exp = available_expiries if available_expiries else [expiry_str]
+        if gex_alcance == "todos":
+            _sel = _gp.todos_los_vencimientos(_fuente_exp, valuation_date,
+                                              hasta=expiry_str)
+        else:
+            _sel = _gp.pick_expiries(_fuente_exp, valuation_date,
+                                     selected=expiry_str)
         _ahora = pd.Timestamp.now(tz="America/New_York")
-        for _etiq, _exp in _sel.items():
-            try:
-                _df = cached_options(ticker, str(_exp.date()))
-            except Exception:
-                continue
-            if _df is None or _df.empty:
-                continue
-            _tk = _tc.time_to_expiry(_ahora, _exp)
-            if _tk["expired"]:
-                continue
-            _gex_chains[_etiq] = _df
-            _gex_Ts[_etiq] = _tk["T"]
-            _gex_exps[_etiq] = _exp
-            try:
-                _r = rnd_bridge.to_rnd_frame(_df)
-                _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
-                if _res:
-                    _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
-                    _gex_fits[_etiq] = (_sm or {}).get("svi")
-                    _gex_fwds[_etiq] = _res["forward"]
-            except Exception:
-                pass
+        with st.spinner(f"Cadenas de {len(_sel)} vencimientos para los muros de GEX..."):
+            for _etiq, _exp in _sel.items():
+                try:
+                    _df = cached_options(ticker, str(_exp.date()))
+                except Exception:
+                    continue
+                if _df is None or _df.empty:
+                    continue
+                _tk = _tc.time_to_expiry(_ahora, _exp)
+                if _tk["expired"]:
+                    continue
+                _gex_chains[_etiq] = _df
+                _gex_Ts[_etiq] = _tk["T"]
+                _gex_exps[_etiq] = _exp
+                # El ajuste SVI solo se necesita para la correccion de sonrisa,
+                # que se aplica al plazo principal. Con dieciseis vencimientos,
+                # calibrarlos todos cuesta segundos y no se usa ninguno salvo
+                # el elegido y el 0DTE.
+                if _etiq not in ("0DTE",) and _exp != pd.Timestamp(expiry_str).normalize():
+                    continue
+                try:
+                    _r = rnd_bridge.to_rnd_frame(_df)
+                    _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
+                    if _res:
+                        _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
+                        _gex_fits[_etiq] = (_sm or {}).get("svi")
+                        _gex_fwds[_etiq] = _res["forward"]
+                except Exception:
+                    pass
         if _gex_chains:
             _gex_pan = _gp.compute(_gex_chains, spot, ticker, _gex_Ts)
             _niv = {}

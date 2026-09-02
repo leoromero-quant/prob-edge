@@ -352,8 +352,8 @@ def test_cada_capa_declara_su_escala():
     # el texto crece hacia la izquierda desde la linea de vencimiento, para no
     # invadir la columna de niveles
     assert reglas[0]["xanchor"] == "right" and reglas[0]["xshift"] < 0
-    # un segmento horizontal mas dos marcas de extremo
-    assert len(lineas) == 3
+    # un segmento horizontal, dos marcas de extremo y el ancla vertical
+    assert len(lineas) == 4
 
 
 def test_la_escala_de_cada_capa_no_se_encima_con_la_otra():
@@ -367,3 +367,56 @@ def test_la_escala_de_cada_capa_no_se_encima_con_la_otra():
     reglas = [n for n in notas if "barra =" in n["text"]]
     assert len(reglas) == 2
     assert reglas[0]["y"] != reglas[1]["y"], "las dos reglas quedaron a la misma altura"
+
+
+def test_con_muchas_capas_solo_los_extremos_llevan_etiqueta():
+    """
+    Con quince vencimientos, cinco etiquetas por capa son setenta y cinco
+    textos sobre la misma lamina y no se lee nada. Las barras van en todas las
+    capas, que es lo que muestra la estructura temporal; las etiquetas, solo en
+    la primera y la ultima.
+    """
+    import pandas as pd
+    from modules import gex_panel as GP
+    base = pd.Timestamp("2026-09-01")
+    capas = [{"etiqueta": f"{i}d", "tabla": _tabla_sintetica(),
+              "x_exp": base + pd.Timedelta(days=3 * i),
+              "niveles": {"call_wall": 770.0, "put_wall": 750.0,
+                          "gamma_flip": 761.0, "max_pain": 758.0}}
+             for i in range(10)]
+    trazas, notas, _ = GP.overlay_cono(capas, pd.Timestamp("2026-05-01"),
+                                       capas[-1]["x_exp"], y_lo=700, y_hi=820)
+    assert len(trazas) == 20, "faltan barras en alguna capa"
+    niveles = [n for n in notas if "barra =" not in n["text"]]
+    assert len(niveles) == 8, "solo la primera y la ultima capa llevan niveles"
+    reglas = [n for n in notas if "barra =" in n["text"]]
+    assert len(reglas) == 2
+
+
+def test_las_barras_de_capas_vecinas_no_se_pisan():
+    """
+    Con vencimientos diarios, una barra de dos semanas invadiria las capas
+    anteriores. El ancho de cada capa se limita por la distancia al vencimiento
+    previo.
+    """
+    import pandas as pd
+    from modules import gex_panel as GP
+    base = pd.Timestamp("2026-09-01")
+    capas = [{"etiqueta": f"{i}d", "tabla": _tabla_sintetica(),
+              "x_exp": base + pd.Timedelta(days=i), "niveles": {}}
+             for i in range(6)]
+    trazas, _, _ = GP.overlay_cono(capas, pd.Timestamp("2026-05-01"),
+                                   capas[-1]["x_exp"], y_lo=700, y_hi=820)
+    # Las trazas salen en pares (calls, puts) por capa, en orden de vencimiento.
+    largos = []
+    for i in range(0, len(trazas), 2):
+        par = trazas[i:i + 2]
+        ini = min(pd.DatetimeIndex(t.base).min() for t in par)
+        fin = max((pd.DatetimeIndex(t.base) + pd.to_timedelta(t.x, unit="ms")).max()
+                  for t in par)
+        largos.append(fin - ini)
+    # La primera capa no tiene vencimiento previo que invadir y usa el ancho
+    # completo; a partir de la segunda lo limita la distancia de un dia.
+    for i, largo in enumerate(largos[1:], start=1):
+        assert largo <= pd.Timedelta(days=1), \
+            f"la capa {i} invade el vencimiento anterior: {largo}"

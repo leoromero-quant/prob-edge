@@ -50,6 +50,39 @@ ALTO = 520
 MARGEN_V = 120
 
 
+# Tope de vencimientos que se piden en modo "todos". Cada uno cuesta una
+# llamada de red de unos dos segundos; veinte es el limite donde la primera
+# carga sigue siendo tolerable. Despues quedan en cache.
+MAX_CAPAS = 20
+
+
+def todos_los_vencimientos(expiries, valuation, hasta=None,
+                           maximo: int = MAX_CAPAS) -> dict:
+    """
+    Todos los vencimientos entre la valuacion y `hasta`, inclusive.
+
+    Es lo que alimenta la vista de estructura temporal de muros: cada
+    vencimiento cuelga su histograma de su propia linea y se ve como se mueve
+    el posicionamiento a lo largo del plazo, que es informacion que ninguna
+    lamina de un solo vencimiento puede dar.
+    """
+    val = pd.Timestamp(valuation).normalize()
+    tope = pd.Timestamp(hasta).normalize() if hasta is not None else None
+    exps = sorted(pd.Timestamp(e).normalize() for e in expiries)
+    out = {}
+    for e in exps:
+        d = (e - val).days
+        if d < 0:
+            continue
+        if tope is not None and e > tope:
+            continue
+        etiq = "0DTE" if d == 0 else f"{d}d"
+        out[etiq] = e
+        if len(out) >= maximo:
+            break
+    return out
+
+
 def pick_expiries(expiries, valuation, selected=None, default_dte: int = DEFAULT_DTE) -> dict:
     """
     Elige los tres plazos del panel. Devuelve un dict con etiquetas legibles y
@@ -462,8 +495,23 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
         return trazas, notas, lineas
     largo_max = (x1 - x0) * float(frac)
 
+    # Se ordenan por vencimiento porque el ancho de cada capa se limita por la
+    # distancia a la capa anterior: con vencimientos diarios, barras de dos
+    # semanas se pisarian unas a otras y la lamina se volveria una mancha.
+    capas = sorted(capas, key=lambda c: pd.Timestamp(c["x_exp"]))
+    # Con muchas capas, las etiquetas de nivel y la regla de escala solo van en
+    # la primera y la ultima. Medido el 2 de septiembre de 2026 con quince
+    # vencimientos: cinco etiquetas por capa son setenta y cinco textos sobre la
+    # misma lamina, y el resultado es ilegible. Las barras si van en todas,
+    # porque son ellas las que muestran la estructura temporal del
+    # posicionamiento; los niveles numericos de los plazos intermedios viven en
+    # el tooltip y en la tabla de comparacion.
+    con_etiqueta = set(range(len(capas))) if len(capas) <= 3 else {0, len(capas) - 1}
+    con_regla = con_etiqueta
+    x_previo = None
+
     primera = True
-    for capa in capas:
+    for i_capa, capa in enumerate(capas):
         t, x_exp = capa["tabla"], pd.Timestamp(capa["x_exp"])
         if t is None or not len(t):
             continue
@@ -486,8 +534,12 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
         vis = tot > PISO_RELATIVO * pico
         K, c, p = K[vis], c[vis], p[vis]
 
-        # El muro no puede extenderse mas alla del inicio de la lamina.
+        # El muro no puede extenderse mas alla del inicio de la lamina ni
+        # invadir el vencimiento anterior.
         techo = min(largo_max, (x_exp - x0) * 0.85)
+        if x_previo is not None:
+            techo = min(techo, (x_exp - x_previo) * 0.90)
+        x_previo = x_exp
         if techo <= pd.Timedelta(0):
             continue
         ms = techo.total_seconds() * 1000.0 / pico     # milisegundos por USD
@@ -507,7 +559,8 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
         # que cada capa declara cuanto vale su barra completa. Sin esto la
         # lamina es cualitativa y no habria con que sustituir la grafica de
         # detalle. Se apila una regla por capa para que no se encimen.
-        y_regla = y_lo + (y_hi - y_lo) * (0.020 + 0.038 * n_capa) if y_lo is not None else None
+        y_regla = (y_lo + (y_hi - y_lo) * (0.020 + 0.038 * n_capa)
+                   if y_lo is not None and i_capa in con_regla else None)
         if y_regla is not None:
             lineas.append(dict(
                 type="line", xref="x", yref="y",
@@ -551,6 +604,18 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
         # Etiquetas directas de los dos muros, ancladas en la linea del
         # vencimiento. Es lo que permite comparar el muro con la densidad sin
         # abrir otra grafica.
+        # Ancla vertical de la capa: una linea tenue en el vencimiento para que
+        # las barras no floten. Va en todas las capas, tambien en las que no
+        # llevan etiqueta.
+        lineas.append(dict(
+            type="line", xref="x", yref="y",
+            x0=x_exp, x1=x_exp,
+            y0=float(np.min(K)), y1=float(np.max(K)),
+            line=dict(color=_rgba(C["ink2"], 0.22), width=1), layer="below"))
+
+        if i_capa not in con_etiqueta:
+            continue
+
         # Referencias del vencimiento. Van con etiqueta a la derecha de la linea
         # y con un segmento horizontal que abarca el ancho de las barras, para
         # que el nivel se lea contra la densidad y no solo contra el eje.
