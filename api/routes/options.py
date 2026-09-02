@@ -23,7 +23,7 @@ from modules.data_provider.tastytrade_options import (
     get_spot_price,
     _get_tt_token,
 )
-from modules.utils import compute_rnd_from_calls
+from modules.utils import get_density_producer
 from api.auth.dependencies import get_current_user
 from api.auth.models import User
 from api.core.config import get_settings
@@ -56,7 +56,21 @@ async def _prepare_rnd_data(
     q_annual: float,
     oi_min: int,
     n_grid: int,
+    method: str = "bl_raw",
 ):
+    # El snapshot de tastytrade no viene normalizado (sin columna 'price' /
+    # paridad put-call), así que "bl" no es servible aquí todavía. Validar
+    # antes de pegarle a la red: fallar fuerte, no degradar en silencio al
+    # extractor crudo (Phase B lo habilita).
+    if method != "bl_raw":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"method '{method}' requires normalized chains, not available on "
+                f"this endpoint yet; use 'bl_raw'."
+            ),
+        )
+
     tt_token = await asyncio.to_thread(_get_tt_token)
 
     if not expiration:
@@ -81,10 +95,11 @@ async def _prepare_rnd_data(
         raise HTTPException(status_code=422, detail=f"El vencimiento {expiration} ya pasó o es hoy.")
 
     # CPU-bound (numpy + PCHIP); a thread para no bloquear el event loop
-    # cuando hay requests concurrentes.
+    # cuando hay requests concurrentes. `method` ya validado arriba (== bl_raw).
+    producer = get_density_producer(method)
     price_grid, rnd_values = await asyncio.to_thread(
-        compute_rnd_from_calls,
-        options_df=df.rename(columns={"contract_type": "option_type", "last_price": "last_close"}),
+        producer,
+        df.rename(columns={"contract_type": "option_type", "last_price": "last_close"}),
         spot=spot,
         valuation_date=valuation_date,
         expiry_date=expiry_date,
@@ -163,11 +178,12 @@ async def get_rnd(
     q_annual: float = Query(0.0, description="Dividend yield anual."),
     oi_min: int = Query(50, description="Open interest mínimo para filtrar contratos."),
     n_grid: int = Query(400, description="Puntos en el grid de precios."),
+    method: str = Query("bl_raw", description="Productor de densidad: 'bl_raw' o 'bl'."),
     current_user: User = Depends(get_current_user),
 ):
     try:
         metadata, price_grid, rnd_values = await _prepare_rnd_data(
-            ticker, expiration, r_annual, q_annual, oi_min, n_grid
+            ticker, expiration, r_annual, q_annual, oi_min, n_grid, method
         )
         return {
             **metadata,

@@ -80,11 +80,11 @@ The `.env.example` documents every env var (data-provider keys, tastytrade OAuth
 
 ## Author
 
-**Leonardo Suárez Romero, PhD** — Quantitative Data Analyst.
+**Leonardo Romero, PhD** — Quantitative Researcher & Senior Financial Analyst. [leoromero.dev](https://leoromero.dev)
 [leoromero.dev](https://leoromero.dev) · [LinkedIn](https://linkedin.com/in/leonardo-suarez-romero)
 
 ## License & Copyright
 
-Copyright © 2025–2026 **Leonardo Suárez Romero**. All rights reserved.
+Copyright © 2025–2026 **Leonardo Romero**. All rights reserved.
 
 Private — source available for inspection only. No license is granted to copy, modify, distribute, sublicense, or use this software, its methodology, or any derivative work for commercial purposes without explicit written permission from the author. See [`COPYRIGHT.md`](./COPYRIGHT.md) for the full intellectual-property declaration, including the scope of the Breeden–Litzenberger + PCHIP pipeline, the timestamped authorship statement, and the bilingual notice in Spanish.
