@@ -663,11 +663,17 @@ def render_densidades(ticker: str):
         else:
             expiry_str = st.text_input("Expiry (YYYY-MM-DD)", value="2025-12-19", key="dens_expiry_manual")
 
-        # Un anio de historico como piso. Con 120 dias la lamina no alcanzaba a
-        # mostrar un ciclo completo y el cono quedaba sin contexto de regimen.
-        past_days = st.number_input("Historical window (days)", min_value=252,
-                                    max_value=2000, value=365, step=10,
-                                    key="dens_past")
+        # Se DESCARGA un anio (Historical range arriba) pero se MUESTRAN 60 dias
+        # por defecto. Medido sobre la lamina del 2 de septiembre de 2026 con un
+        # anio visible: la historia ocupaba el 55% del ancho, la zona de GEX el
+        # 16% y el vacio de la derecha el 29%. El sujeto de la lamina vivia en
+        # una sexta parte del lienzo. Subiendo este numero se recupera el anio
+        # completo cuando se quiere contexto de regimen.
+        past_days = st.number_input("Historical window (days)", min_value=20,
+                                    max_value=2000, value=60, step=10,
+                                    key="dens_past",
+                                    help="Dias de historia VISIBLES. La descarga "
+                                         "sigue siendo la del rango de arriba.")
 
         # ── Alcance de los muros de GEX ────────────────────────────────────
         # "todos" cuelga un histograma de cada vencimiento entre hoy y el
@@ -975,6 +981,7 @@ def render_densidades(ticker: str):
     _gp = _tc = None
     _gex_chains, _gex_Ts, _gex_fits, _gex_fwds = {}, {}, {}, {}
     _gex_pan, _gex_capas, _gex_exps = None, None, {}
+    _gex_perfil = None
     try:
         from modules import gex_panel as _gp
         from modules import time_clock as _tc
@@ -1031,6 +1038,8 @@ def render_densidades(ticker: str):
                 _niv[_f["plazo"]] = _n
             _gex_capas = _gp.capas_overlay(_gex_pan["tablas"], _gex_exps,
                                            niveles=_niv, spot=spot)
+            from modules import iman as _im
+            _gex_perfil = _im.perfil_agregado(_gex_pan["tablas"])
     except Exception as _e:
         st.caption(f"Muros de GEX no disponibles en el cono: {_e}")
 
@@ -1059,6 +1068,37 @@ def render_densidades(ticker: str):
             _lado = "arriba" if _pct >= 0 else "abajo"
             _dist = (f"Spot {spot:,.2f}, {abs(_pct):.2f}% {_lado} del flip en "
                      f"{float(_flip):,.2f}.")
+        # ── El iman, medido ────────────────────────────────────────────────
+        # Un muro atrae si el gamma en el spot es positivo Y el mercado
+        # descuenta llegar ahi. La segunda condicion se mide con la densidad,
+        # que ya tenemos: es la pieza que ningun proveedor de GEX publica.
+        _iman_txt = ""
+        try:
+            from modules import iman as _im
+            _paso = 1.0
+            _tab_pr = (_gex_pan["tablas"] or {}).get(_pr["plazo"])
+            if _tab_pr is not None and len(_tab_pr) > 1:
+                _paso = float(np.median(np.diff(_tab_pr.index.to_numpy(float))))
+            _pmax = _im.pin_maximo(K_grid, pdf_K, paso=_paso)
+            _filas_iman = []
+            for _nom, _val in (("call wall", _pr.get("call_wall")),
+                               ("put wall", _pr.get("put_wall")),
+                               ("max pain", _pr.get("max_pain"))):
+                if _val is None or not pd.notna(_val):
+                    continue
+                _pp = _im.probabilidad_de_pin(K_grid, pdf_K, float(_val), paso=_paso)
+                _sg = _im.distancia_en_sigmas(K_grid, pdf_K, spot, float(_val))
+                _cl = _im.clasificar_nivel(float(_val), spot, _neto, _pp,
+                                           prob_max=_pmax)
+                _filas_iman.append(
+                    f"{_nom} {float(_val):,.0f}: "
+                    f"{'n/d' if _pp is None else format(_pp * 100, '.1f') + '%'} de pin, "
+                    f"{'n/d' if _sg is None else format(_sg, '+.2f')} sigmas, {_cl}")
+            if _filas_iman:
+                _iman_txt = "  ·  ".join(_filas_iman)
+        except Exception:
+            _iman_txt = ""
+
         _mvc_txt = ""
         if pd.notna(_pr.get("mvc_otm_strike")):
             _mvc_txt = (f" MVC fuera del dinero: {_pr['mvc_otm_strike']:,.0f}"
@@ -1078,6 +1118,10 @@ def render_densidades(ticker: str):
                           color:#c3c2b7; margin-top:6px;">
                 {_pr['plazo']} · GEX neto {_neto:,.0f} M USD por movimiento de 1%.
                 {_dist}{_mvc_txt}
+              </div>
+              <div style="font-family:'JetBrains Mono',monospace; font-size:13px;
+                          color:#8f8f88; margin-top:6px;">
+                {_iman_txt}
               </div>
             </div>
             """,
@@ -1132,6 +1176,7 @@ def render_densidades(ticker: str):
         expiry_dates=expiry_dates_win, valuation_date=valuation_date,
         show_heatmap=show_heatmap,
         gex_capas=_gex_capas,
+        perfil_agregado=_gex_perfil,
     )
 
     # ─── Diagnosticos del motor de densidad ──────────────────────────────────

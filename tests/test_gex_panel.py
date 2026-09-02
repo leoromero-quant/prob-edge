@@ -55,7 +55,8 @@ def test_compute_devuelve_las_metricas_de_cada_plazo():
     for c in ("gex_neto_M", "flip", "call_wall", "put_wall", "max_pain",
               "hf_sube_M", "hf_baja_M", "asimetria_M"):
         assert c in f.columns
-    assert pan["sign_convention"] == "index"       # SPY se trata como indice
+    # El signo ya no depende de la clase de activo: convencion del sector.
+    assert pan["sign_convention"] == "single"
     assert pan["regime"] == "sticky_strike"        # default sin ajuste
 
 

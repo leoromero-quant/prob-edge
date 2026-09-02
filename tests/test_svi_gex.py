@@ -97,14 +97,36 @@ def test_muros_salen_donde_esta_el_gamma():
 
 
 def test_convencion_de_signo_difiere_por_clase_de_activo():
-    """SPY se trata como indice y AAPL como single name. Los signos se invierten."""
-    assert G.sign_for("SPY") == G.SIGN_INDEX
+    """
+    El signo ya no depende de la clase de activo. Desde el 2 de septiembre de
+    2026 se usa la convencion del sector para todo, dealer largo calls y corto
+    puts, que es la que publican SpotGamma y el paper de SqueezeMetrics. La
+    hipotesis contraria sigue disponible por override explicito.
+    """
+    assert G.sign_for("SPY") == G.SIGN_SINGLE
     assert G.sign_for("AAPL") == G.SIGN_SINGLE
+    assert G.sign_for("SPY", "index") == G.SIGN_INDEX
     d = frame_gex()
-    li = G.levels(d, 100.0, 30 / 365.25, "SPY")
-    ls = G.levels(d, 100.0, 30 / 365.25, "AAPL")
+    li = G.levels(d, 100.0, 30 / 365.25, "SPY", sign_override="index")
+    ls = G.levels(d, 100.0, 30 / 365.25, "SPY")
     assert np.sign(li["net_gex_at_spot"]) == -np.sign(ls["net_gex_at_spot"])
     assert li["sign_convention"] == "index" and ls["sign_convention"] == "single"
+
+
+def test_con_puts_dominando_el_gamma_en_el_spot_es_negativo():
+    """
+    Es la prueba que faltaba y que habria cazado el signo invertido. Con el
+    interes abierto concentrado en puts, que es la situacion normal de un ETF
+    de indice, el gamma del dealer en el spot tiene que ser NEGATIVO bajo la
+    convencion del sector: por debajo del flip la cobertura amplifica.
+    """
+    d = frame_gex()
+    d = d.copy()
+    d.loc[d.option_type == "P", "open_interest"] *= 5.0
+    L = G.levels(d, 100.0, 30 / 365.25, "SPY")
+    assert L["net_gex_at_spot"] < 0, "con puts dominando el gamma en el spot no puede ser positivo"
+    if L["gamma_flip"] is not None:
+        assert L["gamma_flip"] > 100.0, "el flip queda por encima del spot en gamma negativo"
 
 
 def test_max_pain_es_el_strike_de_minimo_valor_intrinseco():

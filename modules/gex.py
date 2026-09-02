@@ -58,20 +58,50 @@ UNITS = "USD de subyacente por movimiento de 1% en el spot"
 MULTIPLIER = 100.0
 
 # Convencion de signo, declarada y no escondida. +1 = dealer LARGO ese tipo.
-SIGN_SINGLE = {"C": +1, "P": -1}   # single names: cliente neto corto, dealer largo
-SIGN_INDEX  = {"C": -1, "P": +1}   # indices y ETFs de indice: dealer neto corto
+#
+# CAMBIO DEL 2 DE SEPTIEMBRE DE 2026. Hasta esta fecha SPY, QQQ y el resto de
+# INDEX_LIKE usaban SIGN_INDEX, con el argumento de que el cliente de indice
+# compra proteccion y el dealer queda corto. Ese argumento estaba mal aplicado:
+# si el cliente COMPRA puts, el dealer queda CORTO puts, que es P = -1, no +1.
+# El resultado era el signo invertido respecto de todo el sector.
+#
+# Consecuencia medida en SPY a 45 dias el 1 de septiembre de 2026, con 1,349,515
+# contratos de OI en puts contra 300,449 en calls: la convencion vieja daba
+# +879 M en el spot con el flip en 783, o sea gamma POSITIVO por debajo del
+# flip. SpotGamma publica que usa call-positivo / put-negativo y que por debajo
+# del flip la cobertura "compra mas exposicion cuando el precio sube y vende
+# cuando baja", es decir amplificacion. Con la convencion correcta el mismo dato
+# da -879 M y la lectura coincide con la del sector.
+#
+# Nota sobre la validacion contra Barchart de la sesion anterior: el cruce por
+# cero es INVARIANTE al signo, asi que aquella coincidencia de 0.12 puntos
+# valido el nivel del flip y no la direccion. No era evidencia sobre el signo.
+#
+# SIGN_INDEX se conserva porque la hipotesis de inventario contraria es
+# legitima y algun dia puede medirse contra datos etiquetados por participante
+# de Cboe. Se usa solo con override explicito.
+SIGN_SINGLE = {"C": +1, "P": -1}   # dealer largo calls, corto puts. Estandar.
+SIGN_INDEX  = {"C": -1, "P": +1}   # hipotesis contraria. Solo por override.
 
+# Se conserva la lista porque otras partes del modulo distinguen clase de activo
+# (americanas con dividendos, borrow, netting entre productos). Ya NO decide el
+# signo.
 INDEX_LIKE = {"SPY", "QQQ", "IWM", "DIA", "SPX", "SPXW", "NDX", "RUT", "XSP",
               "VIX", "ES", "NQ", "RTY"}
 
 
 def sign_for(symbol: str, override: str | None = None) -> dict:
-    """Convencion de signo por clase de activo. `override` fuerza 'index' o 'single'."""
+    """
+    Convencion de signo. `override` fuerza 'index' o 'single'.
+
+    Por defecto se usa la del sector para todo: dealer largo calls y corto puts.
+    Ver la nota extensa junto a SIGN_SINGLE para por que esto cambio.
+    """
     if override == "index":
         return dict(SIGN_INDEX)
     if override == "single":
         return dict(SIGN_SINGLE)
-    return dict(SIGN_INDEX if symbol.upper() in INDEX_LIKE else SIGN_SINGLE)
+    return dict(SIGN_SINGLE)
 
 
 def bs_gamma(S, K, T, iv, q=0.0, r=0.0):
@@ -194,6 +224,8 @@ def levels(df: pd.DataFrame, spot: float, T: float, symbol: str,
     return {
         "spot": spot, "symbol": symbol, "units": UNITS,
         "sign_convention": "index" if sg == SIGN_INDEX else "single",
+        "sign_nota": ("dealer largo calls, corto puts: convencion publicada por "
+                      "SpotGamma y por el paper de SqueezeMetrics"),
         "smile_regime": "sticky strike",
         "net_gex_at_spot": net_spot,
         "gamma_flip": flip, "gamma_flip_all": flips,

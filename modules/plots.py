@@ -101,6 +101,7 @@ def plot_main_figure(
     show_heatmap: bool = True,
     show_past_rnd: bool = False,
     gex_capas: list | None = None,
+    perfil_agregado=None,
 ):
     """
     Figura principal: OHLC + cono RND (68/95%) + mediana +
@@ -627,5 +628,20 @@ def plot_main_figure(
     for _n in apilar_etiquetas(notas_col, _y0, _y1):
         fig.add_annotation(**_n)
 
-    st.plotly_chart(fig, width="stretch")
+    # El perfil agregado va como histograma marginal a la derecha, sobre el
+    # mismo rango de precio. No se hace con subplots para no reescribir las
+    # cuatrocientas lineas de esta funcion: dos figuras con el mismo rango de y
+    # se leen igual y el riesgo es cero.
+    if perfil_agregado is not None and len(perfil_agregado):
+        from .gex_panel import figura_agregado
+        _c1, _c2 = st.columns([6, 1])
+        with _c1:
+            st.plotly_chart(fig, width="stretch")
+        with _c2:
+            st.plotly_chart(
+                figura_agregado(perfil_agregado, float(quotes_win["Close"].iloc[-1]),
+                                _y0, _y1, alto=ALTO_FIG),
+                width="stretch")
+    else:
+        st.plotly_chart(fig, width="stretch")
     return fig

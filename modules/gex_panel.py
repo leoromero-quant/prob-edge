@@ -175,7 +175,9 @@ def compute(chains: dict, spot: float, symbol: str, Ts: dict,
         filas.append(fila)
         tablas[etiq] = L["table"]
     return {"filas": pd.DataFrame(filas), "tablas": tablas,
-            "sign_convention": ("index" if symbol.upper() in G.INDEX_LIKE else "single"),
+            # El signo ya no depende de la clase de activo: se usa la del
+            # sector para todo. Ver la nota en gex.SIGN_SINGLE.
+            "sign_convention": "single",
             "regime": regime if smile_adjusted else "sticky_strike"}
 
 
@@ -658,3 +660,46 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
     # vencimiento, asi que el apilado de la columna derecha las agrupa aparte
     # por su propio valor de x y no compiten con los niveles.
     return trazas, notas + notas_libres, lineas
+
+
+def figura_agregado(total: pd.DataFrame, spot: float, y_lo: float, y_hi: float,
+                    alto: int = 760):
+    """
+    Perfil agregado de GEX por strike, como histograma marginal a la derecha
+    del cono y sobre el MISMO rango de precio.
+
+    Para la pregunta de a donde jala el precio, el objeto relevante es la suma
+    a lo largo de los vencimientos: el dealer cubre un libro, no un vencimiento
+    aislado. Las quince columnas de la lamina muestran la estructura temporal;
+    esta muestra el total, que es contra lo que se opera.
+    """
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    if total is None or not len(total):
+        return fig
+    t = total[(total.index >= y_lo) & (total.index <= y_hi)]
+    if not len(t):
+        return fig
+    K = t.index.to_numpy(float)
+    paso = float(np.median(np.diff(K))) if len(K) > 1 else 1.0
+    fig.add_trace(go.Bar(
+        y=K, x=t["gex_net"].to_numpy(float) / 1e6, orientation="h",
+        width=paso * 0.85, marker=dict(color=_rgba(C["dens"], 0.75),
+                                       line=dict(width=0)),
+        name="neto agregado",
+        hovertemplate="strike %{y:.0f}<br>neto agregado %{x:,.1f} M<extra></extra>"))
+    fig.add_hline(y=spot, line=dict(color=C["spot"], width=1.2))
+    fig.update_layout(
+        template="plotly_dark", barmode="overlay", bargap=0, height=alto,
+        paper_bgcolor=C["surf"], plot_bgcolor=C["surf"], showlegend=False,
+        title=dict(text="agregado", font=dict(size=TH.ANNOT, color=C["ink2"])),
+        font=TH.layout_font(color=C["ink2"]),
+        hoverlabel=dict(font=dict(size=TH.HOVER)),
+        margin=dict(l=4, r=4, t=50, b=50))
+    fig.update_yaxes(range=[y_lo, y_hi], showticklabels=False,
+                     gridcolor=C["grid"], zeroline=False)
+    fig.update_xaxes(title_text="M USD / 1%", gridcolor=C["grid"],
+                     zeroline=True, zerolinecolor="#444",
+                     tickfont=dict(color=C["ink2"], size=TH.ANNOT - 2),
+                     title_font=dict(color=C["ink2"], size=TH.ANNOT - 1))
+    return fig
