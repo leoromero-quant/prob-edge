@@ -224,13 +224,19 @@ def test_los_cuatro_niveles_llegan_como_etiqueta_y_como_linea():
                           "gamma_flip": 761.25, "max_pain": 758.0}}]
     _, notas, lineas = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xe,
                                        y_lo=700, y_hi=820)
-    assert len(notas) == 4 and len(lineas) == 4
+    niveles = [n for n in notas if "barra =" not in n["text"]]
+    assert len(niveles) == 4
+    notas = niveles
     textos = " ".join(n["text"] for n in notas)
     for termino in ("call wall", "put wall", "gamma flip", "max pain"):
         assert termino in textos
     assert all(n["xanchor"] == "left" and n["xshift"] > 0 for n in notas), \
         "la columna va a la derecha de la linea y justificada a la izquierda"
-    assert all(ln["x1"] == xe and ln["x0"] < xe for ln in lineas)
+    # Cada nivel lleva su segmento horizontal, que termina en la linea de
+    # vencimiento y arranca donde arranca la barra.
+    horizontales = {ln["y0"] for ln in lineas
+                    if ln["y0"] == ln["y1"] and ln["x1"] == xe and ln["x0"] < xe}
+    assert {767.0, 750.0, 761.25, 758.0} <= horizontales
     # el flip se reporta con dos decimales, es un cruce interpolado
     assert any("gamma flip 761.25" in n["text"] for n in notas)
 
@@ -320,5 +326,44 @@ def test_el_mvc_llega_al_overlay_con_su_tipo():
               "niveles": {"mvc": 730.0, "mvc_tipo": "P"}}]
     _, notas, lineas = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xe,
                                        y_lo=700, y_hi=820)
-    assert len(notas) == 1 and len(lineas) == 1
-    assert notas[0]["text"] == "MVC 730P"
+    niveles = [n for n in notas if "barra =" not in n["text"]]
+    assert len(niveles) == 1
+    assert niveles[0]["text"] == "MVC 730P"
+
+
+def test_cada_capa_declara_su_escala():
+    """
+    Con normalizacion por vencimiento el largo de la barra no se lee en valor
+    absoluto. Cada capa declara cuanto vale su barra completa: es lo que
+    sustituye a la grafica de detalle que se retiro.
+    """
+    import numpy as np, pandas as pd
+    from modules import gex_panel as GP
+    xe = pd.Timestamp("2026-10-16")
+    t = _tabla_sintetica()
+    pico = float((t["gex_C"].abs() + t["gex_P"].abs()).max())
+    capas = [{"etiqueta": "45d", "tabla": t, "x_exp": xe, "niveles": {}}]
+    _, notas, lineas = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xe,
+                                       y_lo=700, y_hi=820)
+    reglas = [n for n in notas if "barra =" in n["text"]]
+    assert len(reglas) == 1
+    assert f"{pico / 1e6:,.0f} M" in reglas[0]["text"]
+    assert "45d" in reglas[0]["text"]
+    # el texto crece hacia la izquierda desde la linea de vencimiento, para no
+    # invadir la columna de niveles
+    assert reglas[0]["xanchor"] == "right" and reglas[0]["xshift"] < 0
+    # un segmento horizontal mas dos marcas de extremo
+    assert len(lineas) == 3
+
+
+def test_la_escala_de_cada_capa_no_se_encima_con_la_otra():
+    import pandas as pd
+    from modules import gex_panel as GP
+    xa, xb = pd.Timestamp("2026-09-15"), pd.Timestamp("2026-10-16")
+    capas = [{"etiqueta": "a", "tabla": _tabla_sintetica(), "x_exp": xa, "niveles": {}},
+             {"etiqueta": "b", "tabla": _tabla_sintetica(), "x_exp": xb, "niveles": {}}]
+    _, notas, _ = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xb,
+                                  y_lo=700, y_hi=820)
+    reglas = [n for n in notas if "barra =" in n["text"]]
+    assert len(reglas) == 2
+    assert reglas[0]["y"] != reglas[1]["y"], "las dos reglas quedaron a la misma altura"

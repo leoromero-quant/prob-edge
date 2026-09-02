@@ -326,13 +326,14 @@ def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
         d[2].metric("Razon ajustado / referencia", f"{principal['razon_ajuste']:.2f}x",
                     help="Lejos de 1 significa que la correccion de sonrisa domina.")
 
-    tab = pan["tablas"].get(principal["plazo"])
-    if tab is not None and len(tab):
-        niveles = {"call_wall": principal["call_wall"], "put_wall": principal["put_wall"],
-                   "gamma_flip": principal["flip"], "max_pain": principal["max_pain"]}
-        st.plotly_chart(figure_gex(tab, spot, niveles,
-                                   f"{symbol} · GEX por strike · {principal['plazo']}"),
-                        use_container_width=True)
+    # La grafica de GEX por strike se retiro el 2 de septiembre de 2026. Desde
+    # que los muros cuelgan de la linea de vencimiento en el cono, esta lamina
+    # dibujaba el mismo histograma girado y sobre un eje de precio distinto:
+    # dos veces el mismo objeto en dos escalas obliga al lector a reconciliarlas
+    # mentalmente sin ganar nada. La magnitud por strike vive en el tooltip del
+    # cono y en la escala declarada al pie de cada capa; los agregados, aqui
+    # abajo. `figure_gex` se conserva porque la usan los scripts de preview y
+    # las pruebas de geometria.
 
     # ── HedgeFlow y asimetria ────────────────────────────────────────────────
     st.markdown("#### Flujo de cobertura ante un movimiento de 1%")
@@ -452,6 +453,10 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
     import plotly.graph_objects as go
 
     trazas, notas, lineas = [], [], []
+    # Las notas de la regla no entran en la columna apilada de la derecha: van
+    # ancladas al inicio de la barra y no compiten con los niveles.
+    notas_libres: list[dict] = []
+    n_capa = 0
     x0, x1 = pd.Timestamp(x_ini), pd.Timestamp(x_fin)
     if x1 <= x0:
         return trazas, notas, lineas
@@ -496,6 +501,37 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
         base_p = base_c - pd.to_timedelta(lp, unit="ms")
 
         etiq = capa["etiqueta"]
+
+        # Regla de escala. Con normalizacion por vencimiento el largo de una
+        # barra no es comparable entre capas ni legible en valor absoluto, asi
+        # que cada capa declara cuanto vale su barra completa. Sin esto la
+        # lamina es cualitativa y no habria con que sustituir la grafica de
+        # detalle. Se apila una regla por capa para que no se encimen.
+        y_regla = y_lo + (y_hi - y_lo) * (0.020 + 0.038 * n_capa) if y_lo is not None else None
+        if y_regla is not None:
+            lineas.append(dict(
+                type="line", xref="x", yref="y",
+                x0=x_exp - techo, x1=x_exp, y0=y_regla, y1=y_regla,
+                line=dict(color=_rgba(C["ink2"], 0.55), width=1), layer="above"))
+            for xr in (x_exp - techo, x_exp):
+                lineas.append(dict(
+                    type="line", xref="x", yref="y",
+                    x0=xr, x1=xr,
+                    y0=y_regla - (y_hi - y_lo) * 0.006,
+                    y1=y_regla + (y_hi - y_lo) * 0.006,
+                    line=dict(color=_rgba(C["ink2"], 0.55), width=1), layer="above"))
+            # El texto crece hacia la IZQUIERDA desde la linea de vencimiento.
+            # Anclado a la derecha se salia del area de trazado y chocaba con la
+            # columna de niveles, que ocupa justo ese espacio.
+            notas_libres.append(dict(
+                x=x_exp, y=y_regla, xref="x", yref="y",
+                text=f"{etiq}: barra = {pico / 1e6:,.0f} M",
+                showarrow=False, xanchor="right", yanchor="bottom",
+                xshift=-2, yshift=3,
+                font=dict(color=C["ink2"], size=TH.ANNOT - 2),
+                bgcolor="rgba(0,0,0,0.70)", borderpad=2))
+        n_capa += 1
+
         for nombre, base, largo, valor, col in (
                 ("calls", base_c, lc, c, C["call"]),
                 ("puts",  base_p, lp, p, C["put"])):
@@ -553,4 +589,7 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
                 layer="above",
             ))
 
-    return trazas, notas, lineas
+    # Las notas de la regla se anclan al inicio de la barra, no a la linea de
+    # vencimiento, asi que el apilado de la columna derecha las agrupa aparte
+    # por su propio valor de x y no compiten con los niveles.
+    return trazas, notas + notas_libres, lineas
