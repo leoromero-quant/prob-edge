@@ -592,7 +592,12 @@ def render_densidades(ticker: str):
                 available_expiries = []
 
         if available_expiries:
-            today = pd.Timestamp.today().normalize()
+            # Reloj de Nueva York, no el de la maquina. El DTE de un
+            # vencimiento es un hecho del mercado, y en un servidor en UTC el
+            # dia cambia a las 19:00 hora de Nueva York: el 0DTE aparecia como
+            # vencido durante las ultimas horas de la tarde.
+            today = (pd.Timestamp.now(tz="America/New_York")
+                     .normalize().tz_localize(None))
             expiry_dates = []
             for s in available_expiries:
                 try:
@@ -633,15 +638,20 @@ def render_densidades(ticker: str):
                 if dt is not None:
                     dte_by_expiry[s] = (dt - today).days
 
+            from modules import expiraciones as _exp_mod
+
             def _fmt_expiry(s: str) -> str:
+                """
+                Semanal, mensual y trimestral no son lo mismo: el interes
+                abierto de un mensual es de otro orden y es el que acumula
+                posicion estructural. Leer un GEX de semanal como si fuera de
+                mensual lleva a sobreestimar la fuerza del muro.
+                """
                 days = dte_by_expiry.get(s)
-                if days is None:
-                    return s
-                if days < 0:
-                    return f"{s}  ·  expired"
-                if days == 0:
-                    return f"{s}  ·  0 DTE (today)"
-                return f"{s}  ·  {days} DTE"
+                try:
+                    return _exp_mod.etiqueta(s, days)
+                except Exception:
+                    return s if days is None else f"{s}  ·  {days} DTE"
 
             expiry_str = st.selectbox(
                 "Expiry",
@@ -653,7 +663,11 @@ def render_densidades(ticker: str):
         else:
             expiry_str = st.text_input("Expiry (YYYY-MM-DD)", value="2025-12-19", key="dens_expiry_manual")
 
-        past_days = st.number_input("Historical window (days)", min_value=30, max_value=2000, value=120, step=10, key="dens_past")
+        # Un anio de historico como piso. Con 120 dias la lamina no alcanzaba a
+        # mostrar un ciclo completo y el cono quedaba sin contexto de regimen.
+        past_days = st.number_input("Historical window (days)", min_value=252,
+                                    max_value=2000, value=365, step=10,
+                                    key="dens_past")
 
         # ── Interruptor de motor de densidad ───────────────────────────────
         # Default desde el entorno (PROBEDGE_RND), sobreescribible en vivo para
@@ -933,6 +947,109 @@ def render_densidades(ticker: str):
                 unsafe_allow_html=True,
             )
 
+    # ─── Muros de GEX para colgar del cono ───────────────────────────────────
+    # Se calculan ANTES de la grafica porque la lamina los necesita. El panel de
+    # detalle mas abajo reutiliza este mismo resultado en vez de recalcularlo.
+    _gp = _tc = None
+    _gex_chains, _gex_Ts, _gex_fits, _gex_fwds = {}, {}, {}, {}
+    _gex_pan, _gex_capas, _gex_exps = None, None, {}
+    try:
+        from modules import gex_panel as _gp
+        from modules import time_clock as _tc
+        _sel = _gp.pick_expiries(available_expiries if available_expiries else [expiry_str],
+                                 valuation_date, selected=expiry_str)
+        _ahora = pd.Timestamp.now(tz="America/New_York")
+        for _etiq, _exp in _sel.items():
+            try:
+                _df = cached_options(ticker, str(_exp.date()))
+            except Exception:
+                continue
+            if _df is None or _df.empty:
+                continue
+            _tk = _tc.time_to_expiry(_ahora, _exp)
+            if _tk["expired"]:
+                continue
+            _gex_chains[_etiq] = _df
+            _gex_Ts[_etiq] = _tk["T"]
+            _gex_exps[_etiq] = _exp
+            try:
+                _r = rnd_bridge.to_rnd_frame(_df)
+                _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
+                if _res:
+                    _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
+                    _gex_fits[_etiq] = (_sm or {}).get("svi")
+                    _gex_fwds[_etiq] = _res["forward"]
+            except Exception:
+                pass
+        if _gex_chains:
+            _gex_pan = _gp.compute(_gex_chains, spot, ticker, _gex_Ts)
+            _niv = {}
+            for _, _f in _gex_pan["filas"].iterrows():
+                _n = {"call_wall": _f["call_wall"], "put_wall": _f["put_wall"],
+                      "gamma_flip": _f["flip"], "max_pain": _f["max_pain"]}
+                # El MVC absoluto suele quedar muy dentro del dinero por el
+                # valor intrinseco, fuera de la banda de la lamina. El que se
+                # dibuja es el fuera del dinero, que es el que responde a donde
+                # esta el dinero apostado.
+                if pd.notna(_f.get("mvc_otm_strike")):
+                    _n["mvc"] = _f["mvc_otm_strike"]
+                    _n["mvc_tipo"] = str(_f.get("mvc_otm_tipo", ""))
+                _niv[_f["plazo"]] = _n
+            _gex_capas = _gp.capas_overlay(_gex_pan["tablas"], _gex_exps,
+                                           niveles=_niv, spot=spot)
+    except Exception as _e:
+        st.caption(f"Muros de GEX no disponibles en el cono: {_e}")
+
+    # ─── Alerta de regimen de gamma ──────────────────────────────────────────
+    # Va antes de la grafica porque es la lectura que condiciona todo lo demas.
+    # Gamma negativo significa que la cobertura del dealer va en el sentido del
+    # movimiento y lo amplifica; positivo significa que va en contra y lo
+    # amortigua. El signo del dealer es una convencion declarada, no una
+    # medicion: OPRA no publica lado de la operacion.
+    if _gex_pan is not None and not _gex_pan["filas"].empty:
+        _pr = _gex_pan["filas"].iloc[-1]
+        for _, _f in _gex_pan["filas"].iterrows():
+            if str(_f["plazo"]).startswith("elegido"):
+                _pr = _f
+                break
+        _neto = float(_pr["gex_neto_M"])
+        _flip = _pr.get("flip")
+        _negativo = _neto < 0
+        _col = "#d95926" if _negativo else "#199e70"
+        _titulo = ("GAMMA NEGATIVO · la cobertura amplifica el movimiento"
+                   if _negativo else
+                   "GAMMA POSITIVO · la cobertura amortigua el movimiento")
+        _dist = ""
+        if _flip is not None and pd.notna(_flip) and spot:
+            _pct = (spot - float(_flip)) / float(_flip) * 100.0
+            _lado = "arriba" if _pct >= 0 else "abajo"
+            _dist = (f"Spot {spot:,.2f}, {abs(_pct):.2f}% {_lado} del flip en "
+                     f"{float(_flip):,.2f}.")
+        _mvc_txt = ""
+        if pd.notna(_pr.get("mvc_otm_strike")):
+            _mvc_txt = (f" MVC fuera del dinero: {_pr['mvc_otm_strike']:,.0f}"
+                        f"{_pr.get('mvc_otm_tipo','')} con "
+                        f"{_pr['mvc_otm_prima_M']:,.1f} M de prima viva.")
+        st.markdown(
+            f"""
+            <div style="
+                border-left: 4px solid {_col};
+                background: linear-gradient(90deg, {_col}22 0%, rgba(0,0,0,0) 70%);
+                padding: 12px 16px; margin: 4px 0 14px 0; border-radius: 4px;">
+              <div style="font-family:'JetBrains Mono',monospace; font-size:16px;
+                          font-weight:600; color:{_col}; letter-spacing:0.02em;">
+                {_titulo}
+              </div>
+              <div style="font-family:'JetBrains Mono',monospace; font-size:14px;
+                          color:#c3c2b7; margin-top:6px;">
+                {_pr['plazo']} · GEX neto {_neto:,.0f} M USD por movimiento de 1%.
+                {_dist}{_mvc_txt}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     # ─── Controles de la grafica ─────────────────────────────────────────────
     # Los dos controles que cambian lo que se ve van juntos y antes de la
     # grafica, no despues: quien llega a la lamina primero encuentra con que
@@ -975,53 +1092,6 @@ def render_densidades(ticker: str):
                           "ajustada y extension de cola acotada por Lee."),
                     horizontal=True,
                 )
-
-    # ─── Muros de GEX para colgar del cono ───────────────────────────────────
-    # Se calculan ANTES de la grafica porque la lamina los necesita. El panel de
-    # detalle mas abajo reutiliza este mismo resultado en vez de recalcularlo.
-    _gp = _tc = None
-    _gex_chains, _gex_Ts, _gex_fits, _gex_fwds = {}, {}, {}, {}
-    _gex_pan, _gex_capas, _gex_exps = None, None, {}
-    try:
-        from modules import gex_panel as _gp
-        from modules import time_clock as _tc
-        _sel = _gp.pick_expiries(available_expiries if available_expiries else [expiry_str],
-                                 valuation_date, selected=expiry_str)
-        _ahora = pd.Timestamp.now(tz="America/New_York")
-        for _etiq, _exp in _sel.items():
-            try:
-                _df = cached_options(ticker, str(_exp.date()))
-            except Exception:
-                continue
-            if _df is None or _df.empty:
-                continue
-            _tk = _tc.time_to_expiry(_ahora, _exp)
-            if _tk["expired"]:
-                continue
-            _gex_chains[_etiq] = _df
-            _gex_Ts[_etiq] = _tk["T"]
-            _gex_exps[_etiq] = _exp
-            try:
-                _r = rnd_bridge.to_rnd_frame(_df)
-                _res = rnd_forward_mod.rnd(_r, spot, _tk["T"], smile_model="svi")
-                if _res:
-                    _sm = rnd_forward_mod.fit_smile(_r, _res["forward"], model="svi", T=_tk["T"])
-                    _gex_fits[_etiq] = (_sm or {}).get("svi")
-                    _gex_fwds[_etiq] = _res["forward"]
-            except Exception:
-                pass
-        if _gex_chains:
-            _gex_pan = _gp.compute(_gex_chains, spot, ticker, _gex_Ts)
-            _niv = {}
-            for _, _f in _gex_pan["filas"].iterrows():
-                _niv[_f["plazo"]] = {"call_wall": _f["call_wall"],
-                                     "put_wall": _f["put_wall"],
-                                     "gamma_flip": _f["flip"],
-                                     "max_pain": _f["max_pain"]}
-            _gex_capas = _gp.capas_overlay(_gex_pan["tablas"], _gex_exps,
-                                           niveles=_niv, spot=spot)
-    except Exception as _e:
-        st.caption(f"Muros de GEX no disponibles en el cono: {_e}")
 
     plot_main_figure(
         quotes_df, dates_win, price_grid, density_win,

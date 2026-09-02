@@ -265,3 +265,60 @@ def test_capas_overlay_recorta_a_la_banda_del_spot():
     assert len(capas) == 1
     K = capas[0]["tabla"].index
     assert K.min() >= 760 * 0.95 and K.max() <= 760 * 1.05
+
+
+# ─── MVC ────────────────────────────────────────────────────────────────────
+
+def _cadena_sintetica(spot=760.0):
+    import numpy as np, pandas as pd
+    K = np.arange(700.0, 820.0, 10.0)
+    filas = []
+    for k in K:
+        for tipo in ("C", "P"):
+            intr = max(spot - k, 0.0) if tipo == "C" else max(k - spot, 0.0)
+            mid = intr + 3.0
+            filas.append({"strike": k, "option_type": tipo, "iv": 0.20,
+                          "gamma": 0.01, "open_interest": 1000.0, "volume": 10.0,
+                          "bid": mid - 0.05, "ask": mid + 0.05})
+    return pd.DataFrame(filas)
+
+
+def test_el_mvc_es_el_contrato_con_mas_prima_viva():
+    """
+    Con el mismo interes abierto en toda la cadena, el contrato mas valioso es
+    el de mayor prima unitaria, que por el valor intrinseco es el mas dentro
+    del dinero. Esa es exactamente la advertencia que la interfaz declara.
+    """
+    from modules import gex as G
+    df = _cadena_sintetica(spot=760.0)
+    r = G.contrato_mas_valioso(df, spot=760.0)
+    assert r["mvc"]["strike"] == 700.0 and r["mvc"]["tipo"] == "C"
+    esperado = r["mvc"]["mid"] * r["mvc"]["oi"] * G.MULTIPLIER
+    assert abs(r["mvc"]["prima"] - esperado) < 1e-6
+
+
+def test_el_mvc_fuera_del_dinero_excluye_el_intrinseco():
+    from modules import gex as G
+    df = _cadena_sintetica(spot=760.0)
+    r = G.contrato_mas_valioso(df, spot=760.0)
+    c = r["mvc_otm"]
+    assert (c["tipo"] == "C" and c["strike"] > 760.0) or \
+           (c["tipo"] == "P" and c["strike"] < 760.0)
+
+
+def test_sin_spot_no_hay_variante_fuera_del_dinero():
+    from modules import gex as G
+    r = G.contrato_mas_valioso(_cadena_sintetica())
+    assert "mvc" in r and "mvc_otm" not in r
+
+
+def test_el_mvc_llega_al_overlay_con_su_tipo():
+    import pandas as pd
+    from modules import gex_panel as GP
+    xe = pd.Timestamp("2026-10-16")
+    capas = [{"etiqueta": "45d", "tabla": _tabla_sintetica(), "x_exp": xe,
+              "niveles": {"mvc": 730.0, "mvc_tipo": "P"}}]
+    _, notas, lineas = GP.overlay_cono(capas, pd.Timestamp("2026-06-01"), xe,
+                                       y_lo=700, y_hi=820)
+    assert len(notas) == 1 and len(lineas) == 1
+    assert notas[0]["text"] == "MVC 730P"

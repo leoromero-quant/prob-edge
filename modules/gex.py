@@ -207,6 +207,54 @@ def levels(df: pd.DataFrame, spot: float, T: float, symbol: str,
     }
 
 
+def contrato_mas_valioso(df: pd.DataFrame, spot: float | None = None) -> dict | None:
+    """
+    MVC: el contrato con mas prima viva, definida como OI x mid x MULTIPLIER.
+
+    Es la lectura literal de "most valuable contract": donde estan los dolares
+    realmente comprometidos, no donde hay mas contratos ni donde hay mas gamma.
+    Un strike con cien mil contratos a dos centavos vale menos que uno con mil a
+    diez dolares, y el segundo es el que duele si se mueve.
+
+    No es termino estandar de mesa y no hay definicion publicada que citar, asi
+    que la formula queda declarada aqui y en la interfaz.
+
+    Advertencia de lectura: la prima incluye valor intrinseco, de modo que el
+    resultado sesga hacia contratos dentro del dinero. Con `spot` se devuelve
+    tambien el mejor contrato fuera del dinero, que responde a "donde esta el
+    dinero apostado" en vez de "donde esta el dinero".
+    """
+    d = prepare(df)
+    if d.empty:
+        return None
+    bid = pd.to_numeric(d.get("bid"), errors="coerce")
+    ask = pd.to_numeric(d.get("ask"), errors="coerce")
+    mid = np.where((bid > 0) & (ask > 0), (bid + ask) / 2.0, np.nan)
+    if "mid" in d.columns:
+        alt = pd.to_numeric(d["mid"], errors="coerce").to_numpy(float)
+        mid = np.where(np.isfinite(mid), mid, alt)
+    d = d.assign(_mid=mid)
+    d = d[np.isfinite(d["_mid"]) & (d["_mid"] > 0)]
+    if d.empty:
+        return None
+    d = d.assign(_prima=d["_mid"] * d["open_interest"] * MULTIPLIER)
+
+    def _fila(r) -> dict:
+        return {"strike": float(r["strike"]), "tipo": str(r["option_type"]),
+                "mid": float(r["_mid"]), "oi": float(r["open_interest"]),
+                "prima": float(r["_prima"])}
+
+    out = {"mvc": _fila(d.loc[d["_prima"].idxmax()]),
+           "prima_total": float(d["_prima"].sum()),
+           "definicion": "OI x mid x 100, prima viva en dolares"}
+    if spot:
+        otm = d[((d.option_type == "C") & (d.strike > spot)) |
+                ((d.option_type == "P") & (d.strike < spot))]
+        if len(otm):
+            out["mvc_otm"] = _fila(otm.loc[otm["_prima"].idxmax()])
+    return out
+
+
 def max_pain(df: pd.DataFrame) -> float | None:
     """Strike que minimiza el valor intrinseco total en circulacion al vencimiento."""
     d = prepare(df)

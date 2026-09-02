@@ -23,7 +23,9 @@ class Settings:
     MASSIVE_API_KEY: str = field(default_factory=lambda: _get("MASSIVE_API_KEY"))
     FMP_API_KEY: str = field(default_factory=lambda: _get("FMP_API_KEY"))
 
-    DEFAULT_RANGE: str = "ytd"
+    # Un anio de historico como default. "ytd" en enero devuelve dos semanas de
+    # datos y el cono queda sin contexto.
+    DEFAULT_RANGE: str = "y1"
     DEFAULT_RATE: float = 0.04
     HIST_SIGMA_REL: float = 0.01
     N_STRIKE_POINTS: int = 200

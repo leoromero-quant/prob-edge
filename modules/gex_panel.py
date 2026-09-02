@@ -37,6 +37,7 @@ C = {
     "ink":   "#ffffff",
     "ink2":  "#c3c2b7",
     "surf":  "#000000",
+    "mvc":   "#8f6fe0",   # violeta, slot categorico libre
 }
 
 from . import theme as TH
@@ -98,6 +99,10 @@ def compute(chains: dict, spot: float, symbol: str, Ts: dict,
             hf = G.hedge_flow(df, spot, T, symbol, x=0.01)
         except Exception:
             continue
+        try:
+            mvc = G.contrato_mas_valioso(df, spot) or {}
+        except Exception:
+            mvc = {}
         if not L:
             continue
         fila = {
@@ -112,6 +117,16 @@ def compute(chains: dict, spot: float, symbol: str, Ts: dict,
             "asimetria_M": hf.get("asymmetry", np.nan) / 1e6,
             "hf_vs_puntual": hf.get("ratio_vs_pointwise"),
         }
+        # MVC: contrato con mas prima viva. Se guardan el absoluto y el fuera
+        # del dinero, porque el absoluto sesga hacia dentro del dinero por el
+        # valor intrinseco y no siempre es la lectura util.
+        for sufijo, clave in (("", "mvc"), ("_otm", "mvc_otm")):
+            c = mvc.get(clave)
+            if c:
+                fila[f"mvc{sufijo}_strike"] = c["strike"]
+                fila[f"mvc{sufijo}_tipo"] = c["tipo"]
+                fila[f"mvc{sufijo}_prima_M"] = c["prima"] / 1e6
+                fila[f"mvc{sufijo}_oi"] = c["oi"]
         if smile_adjusted and svi_fits and svi_fits.get(etiq) is not None:
             try:
                 Le = G.levels_effective(df, spot, T, symbol, svi_fits[etiq],
@@ -281,6 +296,28 @@ def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
     m[3].metric("Put wall", f"{principal['put_wall']:,.0f}" if principal["put_wall"] else "n/d")
     m[4].metric("Max pain", f"{principal['max_pain']:,.0f}" if principal["max_pain"] else "n/d")
 
+    # ── MVC ──────────────────────────────────────────────────────────────────
+    if pd.notna(principal.get("mvc_strike")):
+        v = st.columns(3)
+        v[0].metric(
+            "MVC", f"{principal['mvc_strike']:,.0f}{principal.get('mvc_tipo','')}",
+            f"{principal['mvc_prima_M']:,.1f} M de prima viva",
+            help=("Most Valuable Contract: el contrato con mas prima abierta, "
+                  "definida como interes abierto x mid x 100. No es termino "
+                  "estandar de mesa y no hay definicion publicada que citar, "
+                  "asi que la formula queda declarada. La prima incluye valor "
+                  "intrinseco, por eso el absoluto suele caer dentro del dinero."))
+        if pd.notna(principal.get("mvc_otm_strike")):
+            v[1].metric(
+                "MVC fuera del dinero",
+                f"{principal['mvc_otm_strike']:,.0f}{principal.get('mvc_otm_tipo','')}",
+                f"{principal['mvc_otm_prima_M']:,.1f} M de prima viva",
+                help=("El mismo calculo excluyendo valor intrinseco. Responde a "
+                      "donde esta el dinero APOSTADO en vez de donde esta el "
+                      "dinero. Es el que se dibuja sobre el cono."))
+            v[2].metric("OI del MVC fuera del dinero",
+                        f"{principal['mvc_otm_oi']:,.0f}")
+
     if ajustado and "flip_ajustado" in filas.columns and pd.notna(principal.get("flip_ajustado")):
         d = st.columns(3)
         d[0].metric("Flip ajustado", f"{principal['flip_ajustado']:,.2f}",
@@ -318,6 +355,7 @@ def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
 
     st.markdown("#### Comparacion entre plazos")
     cols = ["plazo", "gex_neto_M", "flip", "call_wall", "put_wall", "max_pain",
+            "mvc_otm_strike", "mvc_otm_tipo", "mvc_otm_prima_M",
             "oi_pcr", "hf_sube_M", "hf_baja_M", "asimetria_M"]
     if ajustado and "flip_ajustado" in filas.columns:
         cols += ["flip_ajustado", "razon_ajuste"]
@@ -484,7 +522,8 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
                 ("call wall", "call_wall", C["call"], "dash"),
                 ("put wall",  "put_wall",  C["put"],  "dash"),
                 ("gamma flip", "gamma_flip", C["flip"], "dot"),
-                ("max pain",  "max_pain",  C["net"],  "dot")):
+                ("max pain",  "max_pain",  C["net"],  "dot"),
+                ("MVC",       "mvc",       C["mvc"],  "dashdot")):
             v = (capa.get("niveles") or {}).get(clave)
             try:
                 v = float(v)
@@ -494,7 +533,12 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
                 continue
             if y_lo is not None and not (y_lo <= v <= y_hi):
                 continue
-            texto = f"{nombre} {v:,.2f}" if clave == "gamma_flip" else f"{nombre} {v:,.0f}"
+            if clave == "gamma_flip":
+                texto = f"{nombre} {v:,.2f}"
+            elif clave == "mvc":
+                texto = f"{nombre} {v:,.0f}{(capa.get('niveles') or {}).get('mvc_tipo', '')}"
+            else:
+                texto = f"{nombre} {v:,.0f}"
             notas.append(dict(
                 x=x_exp, y=v, xref="x", yref="y",
                 text=texto, showarrow=False,
