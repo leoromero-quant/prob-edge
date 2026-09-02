@@ -735,6 +735,16 @@ def render_densidades(ticker: str):
 
     hist_sigma_rel = float(settings.HIST_SIGMA_REL)
     st.caption("Data: tastytrade (options · real-time) · FMP (historical OHLCV)")
+    # Declarar la proporcion entre lo descargado y lo dibujado. Sin esto no hay
+    # forma de notar que se estan pidiendo cinco anios para mostrar sesenta
+    # dias, que es lo que estaba pasando.
+    _dias_desc = {"d1": 1, "d5": 5, "m1": 21, "m3": 63, "m6": 126, "ytd": 252,
+                  "y1": 252, "y2": 504, "y5": 1260, "max": 0}.get(range_code, 252)
+    _desc_txt = "todo el historico" if _dias_desc == 0 else f"{_dias_desc} sesiones"
+    st.caption(f"Historico: se descargan {_desc_txt} (`{range_code}`) y se "
+               f"dibujan los ultimos {int(past_days)} dias naturales. "
+               f"Sube la ventana en la barra lateral para ver mas contexto de "
+               f"regimen sin volver a descargar.")
 
     try:
         quotes_df = cached_quotes(
@@ -981,7 +991,6 @@ def render_densidades(ticker: str):
     _gp = _tc = None
     _gex_chains, _gex_Ts, _gex_fits, _gex_fwds = {}, {}, {}, {}
     _gex_pan, _gex_capas, _gex_exps = None, None, {}
-    _gex_perfil = None
     try:
         from modules import gex_panel as _gp
         from modules import time_clock as _tc
@@ -1038,8 +1047,6 @@ def render_densidades(ticker: str):
                 _niv[_f["plazo"]] = _n
             _gex_capas = _gp.capas_overlay(_gex_pan["tablas"], _gex_exps,
                                            niveles=_niv, spot=spot)
-            from modules import iman as _im
-            _gex_perfil = _im.perfil_agregado(_gex_pan["tablas"])
     except Exception as _e:
         st.caption(f"Muros de GEX no disponibles en el cono: {_e}")
 
@@ -1171,13 +1178,13 @@ def render_densidades(ticker: str):
                     horizontal=True,
                 )
 
-    plot_main_figure(
+    _fig_cono = plot_main_figure(
         quotes_df, dates_win, price_grid, density_win,
         expiry_dates=expiry_dates_win, valuation_date=valuation_date,
         show_heatmap=show_heatmap,
         gex_capas=_gex_capas,
-        perfil_agregado=_gex_perfil,
     )
+    _y_rango = _fig_cono.get("y_rango") if isinstance(_fig_cono, dict) else None
 
     # ─── Diagnosticos del motor de densidad ──────────────────────────────────
     # Solo en modo forward hay diagnosticos que auditar: el legacy no cumple la
@@ -1252,7 +1259,7 @@ def render_densidades(ticker: str):
         if _gex_chains:
             _gp.render(_gex_chains, spot, ticker, _gex_Ts, valuation_date,
                        svi_fits=_gex_fits, forwards=_gex_fwds,
-                       pan_previo=_gex_pan)
+                       pan_previo=_gex_pan, y_rango=_y_rango)
         else:
             st.info("No hay cadenas utilizables para el panel de Gamma Exposure.")
     except Exception as _e:

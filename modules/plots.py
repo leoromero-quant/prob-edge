@@ -101,7 +101,6 @@ def plot_main_figure(
     show_heatmap: bool = True,
     show_past_rnd: bool = False,
     gex_capas: list | None = None,
-    perfil_agregado=None,
 ):
     """
     Figura principal: OHLC + cono RND (68/95%) + mediana +
@@ -406,8 +405,8 @@ def plot_main_figure(
                     showarrow=False,
                     font=dict(color=color, size=TH.ANNOT,
                               family="JetBrains Mono, Consolas, monospace"),
-                    bgcolor="rgba(0,0,0,0.55)",
-                    borderpad=2,
+                    bgcolor="rgba(0,0,0,0)",
+                    borderpad=1,
                     opacity=0.95,
                 ))
 
@@ -470,8 +469,8 @@ def plot_main_figure(
                             font=dict(color=color, size=TH.ANNOT,
                                       family="JetBrains Mono, Consolas, monospace"),
                             showarrow=False,
-                            bgcolor="rgba(0,0,0,0.50)",
-                            borderpad=2,
+                            bgcolor="rgba(0,0,0,0)",
+                            borderpad=1,
                             opacity=0.92,
                         ))
 
@@ -521,7 +520,11 @@ def plot_main_figure(
     # de la lamina.
     if gex_capas:
         from .gex_panel import overlay_cono
-        _x0 = pd.Timestamp(pd.to_datetime(quotes_df["Date"]).min())
+        # BUG corregido el 2 de septiembre de 2026: esto usaba quotes_df, que es
+        # la descarga completa. Con cinco anios descargados el eje se estiraba a
+        # 2022 y las velas de la ventana quedaban aplastadas en un centimetro,
+        # anulando el efecto de "dias visibles". La ventana es dates_all.
+        _x0 = pd.Timestamp(x_vals.min())
         _x1 = pd.Timestamp(max(pd.Timestamp(d) for d in expiry_dates)) \
             if len(expiry_dates) else pd.Timestamp(dates_all[-1])
         _trazas, _notas, _lineas = overlay_cono(
@@ -619,29 +622,28 @@ def plot_main_figure(
     # precio en pixel y con autorango esa conversion no es exacta. Se toma la
     # union de la malla de densidad y de las velas de la ventana, mas 1% de
     # holgura, que es practicamente lo que el autorango elegia.
+    # El rango de precio sale de lo que se DIBUJA, no de la malla completa. La
+    # malla del motor forward abarca dieciseis sigmas para que la cola quede
+    # capturada, y usarla como rango llevaba el eje de 400 a 860 con el precio
+    # en 761: el cono quedaba comprimido en una quinta parte de la altura. Lo
+    # que se dibuja son las velas de la ventana y las bandas del 95%.
     _cand = quotes_win[["Low", "High"]].to_numpy(dtype=float)
-    _y0 = float(np.nanmin([np.nanmin(price_grid), np.nanmin(_cand)]))
-    _y1 = float(np.nanmax([np.nanmax(price_grid), np.nanmax(_cand)]))
-    _pad_y = (_y1 - _y0) * 0.01
+    _bandas = [b for b in (q2p5, q97p5) if b is not None]
+    _vals = [np.nanmin(_cand), np.nanmax(_cand)]
+    for _b in _bandas:
+        _bw = np.asarray(_b, float)[mask_future] if mask_future.any() else np.asarray(_b, float)
+        if np.isfinite(_bw).any():
+            _vals += [np.nanmin(_bw), np.nanmax(_bw)]
+    _y0, _y1 = float(np.nanmin(_vals)), float(np.nanmax(_vals))
+    _pad_y = (_y1 - _y0) * 0.02
     _y0, _y1 = _y0 - _pad_y, _y1 + _pad_y
     fig.update_yaxes(range=[_y0, _y1])
     for _n in apilar_etiquetas(notas_col, _y0, _y1):
         fig.add_annotation(**_n)
 
-    # El perfil agregado va como histograma marginal a la derecha, sobre el
-    # mismo rango de precio. No se hace con subplots para no reescribir las
-    # cuatrocientas lineas de esta funcion: dos figuras con el mismo rango de y
-    # se leen igual y el riesgo es cero.
-    if perfil_agregado is not None and len(perfil_agregado):
-        from .gex_panel import figura_agregado
-        _c1, _c2 = st.columns([6, 1])
-        with _c1:
-            st.plotly_chart(fig, width="stretch")
-        with _c2:
-            st.plotly_chart(
-                figura_agregado(perfil_agregado, float(quotes_win["Close"].iloc[-1]),
-                                _y0, _y1, alto=ALTO_FIG),
-                width="stretch")
-    else:
-        st.plotly_chart(fig, width="stretch")
-    return fig
+    # El perfil agregado ya no vive junto al cono: comprimido a un sexto del
+    # ancho no se leia, y compite con la lamina en vez de complementarla. Vive
+    # abajo, despues de la tabla de Gamma Exposure, a ancho completo. Se
+    # devuelve el rango de precio para que aquella figura use el mismo eje.
+    st.plotly_chart(fig, width="stretch")
+    return {"figura": fig, "y_rango": (_y0, _y1)}

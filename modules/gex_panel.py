@@ -253,7 +253,7 @@ def figure_gex(tabla: pd.DataFrame, spot: float, niveles: dict, titulo: str,
 
 def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
            svi_fits: dict | None = None, forwards: dict | None = None,
-           pan_previo: dict | None = None):
+           pan_previo: dict | None = None, y_rango: tuple | None = None):
     """
     Dibuja el panel en Streamlit. Se separa de `compute` para que el calculo se
     pueda probar sin levantar la aplicacion.
@@ -397,6 +397,33 @@ def render(chains: dict, spot: float, symbol: str, Ts: dict, valuation,
         cols += ["flip_ajustado", "razon_ajuste"]
     st.dataframe(filas[[c for c in cols if c in filas.columns]].round(2),
                  hide_index=True, use_container_width=True)
+    # ── Perfil agregado ──────────────────────────────────────────────────────
+    # Va aqui, despues de la tabla, y no junto al cono: comprimido a un sexto
+    # del ancho no se leia. El cono muestra la estructura temporal, vencimiento
+    # por vencimiento; esta muestra el total, que es contra lo que se opera
+    # porque el dealer cubre un libro y no un vencimiento aislado.
+    try:
+        from . import iman as _im
+        _perfil = _im.perfil_agregado(pan["tablas"])
+        if _perfil is not None and len(_perfil):
+            if y_rango is None:
+                y_rango = (spot * 0.90, spot * 1.10)
+            st.markdown("#### Perfil agregado sobre todos los vencimientos")
+            st.plotly_chart(
+                figura_agregado(_perfil, spot, y_rango[0], y_rango[1],
+                                niveles={"call_wall": principal["call_wall"],
+                                         "put_wall": principal["put_wall"],
+                                         "gamma_flip": principal["flip"]}),
+                use_container_width=True)
+            st.caption(
+                "Suma del GEX por strike a lo largo de los vencimientos cargados. "
+                "Los niveles marcados son los del plazo principal, no los del "
+                "agregado: sirven para ubicar, no para leerlos como niveles del "
+                "total."
+            )
+    except Exception as _e:
+        st.caption(f"Perfil agregado no disponible: {_e}")
+
     st.caption(
         "Advertencias que aplican a toda la tabla. El interes abierto es del "
         "cierre ANTERIOR: lo produce la OCC de noche y no existe interes abierto "
@@ -584,7 +611,7 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
                 showarrow=False, xanchor="right", yanchor="bottom",
                 xshift=-2, yshift=3,
                 font=dict(color=C["ink2"], size=TH.ANNOT - 2),
-                bgcolor="rgba(0,0,0,0.70)", borderpad=2))
+                bgcolor="rgba(0,0,0,0)", borderpad=1))
         n_capa += 1
 
         for nombre, base, largo, valor, col in (
@@ -647,7 +674,7 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
                 text=texto, showarrow=False,
                 xanchor="left", yanchor="middle", xshift=6,
                 font=dict(color=col, size=TH.ANNOT),
-                bgcolor="rgba(0,0,0,0.75)", borderpad=2,
+                bgcolor="rgba(0,0,0,0)", borderpad=1,
             ))
             lineas.append(dict(
                 type="line", xref="x", yref="y",
@@ -663,7 +690,7 @@ def overlay_cono(capas: list[dict], x_ini, x_fin, y_lo=None, y_hi=None,
 
 
 def figura_agregado(total: pd.DataFrame, spot: float, y_lo: float, y_hi: float,
-                    alto: int = 760):
+                    alto: int = 420, niveles: dict | None = None):
     """
     Perfil agregado de GEX por strike, como histograma marginal a la derecha
     del cono y sobre el MISMO rango de precio.
@@ -688,18 +715,38 @@ def figura_agregado(total: pd.DataFrame, spot: float, y_lo: float, y_hi: float,
                                        line=dict(width=0)),
         name="neto agregado",
         hovertemplate="strike %{y:.0f}<br>neto agregado %{x:,.1f} M<extra></extra>"))
-    fig.add_hline(y=spot, line=dict(color=C["spot"], width=1.2))
+    fig.add_hline(y=spot, line=dict(color=C["spot"], width=1.4),
+                  annotation_text=f"spot {spot:,.2f}",
+                  annotation_position="top right",
+                  annotation_bgcolor="rgba(0,0,0,0)",
+                  annotation_font=dict(color=C["spot"], size=TH.ANNOT))
+    for nombre, clave, col in (("call wall", "call_wall", C["call"]),
+                               ("put wall", "put_wall", C["put"]),
+                               ("gamma flip", "gamma_flip", C["flip"])):
+        v = (niveles or {}).get(clave)
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(v) or not (y_lo <= v <= y_hi):
+            continue
+        fig.add_hline(y=v, line=dict(color=_rgba(col, 0.8), width=1.2, dash="dash"),
+                      annotation_text=f"{nombre} {v:,.0f}",
+                      annotation_position="top right",
+                      annotation_bgcolor="rgba(0,0,0,0)",
+                      annotation_font=dict(color=col, size=TH.ANNOT))
     fig.update_layout(
         template="plotly_dark", barmode="overlay", bargap=0, height=alto,
         paper_bgcolor=C["surf"], plot_bgcolor=C["surf"], showlegend=False,
-        title=dict(text="agregado", font=dict(size=TH.ANNOT, color=C["ink2"])),
         font=TH.layout_font(color=C["ink2"]),
         hoverlabel=dict(font=dict(size=TH.HOVER)),
-        margin=dict(l=4, r=4, t=50, b=50))
-    fig.update_yaxes(range=[y_lo, y_hi], showticklabels=False,
-                     gridcolor=C["grid"], zeroline=False)
-    fig.update_xaxes(title_text="M USD / 1%", gridcolor=C["grid"],
-                     zeroline=True, zerolinecolor="#444",
-                     tickfont=dict(color=C["ink2"], size=TH.ANNOT - 2),
-                     title_font=dict(color=C["ink2"], size=TH.ANNOT - 1))
+        margin=dict(l=20, r=110, t=20, b=55))
+    fig.update_yaxes(range=[y_lo, y_hi], side="right", title_text="strike",
+                     gridcolor=C["grid"], zeroline=False,
+                     tickfont=dict(color=C["ink2"], size=TH.TICK),
+                     title_font=dict(color=C["ink2"], size=TH.AXIS_TITLE))
+    fig.update_xaxes(title_text="millones USD por movimiento de 1%, sumado sobre vencimientos",
+                     gridcolor=C["grid"], zeroline=True, zerolinecolor="#555",
+                     tickfont=dict(color=C["ink2"], size=TH.TICK),
+                     title_font=dict(color=C["ink2"], size=TH.AXIS_TITLE))
     return fig
