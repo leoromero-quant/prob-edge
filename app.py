@@ -975,6 +975,8 @@ def render_densidades(ticker: str):
                 f'padding: 2px;"/>'
             ) if _t_logo else ""
 
+            # Keep {_t_logo_html} on the same line as the next <div>: with no logo (indices
+            # like SPX) a blank line would end the Markdown HTML block and leak the rest as code.
             st.markdown(
                 f"""
                 <div style="
@@ -984,8 +986,7 @@ def render_densidades(ticker: str):
                     padding: 8px 6px 18px 6px;
                     margin: 0 0 14px 0;
                 ">
-                    {_t_logo_html}
-                    <div style="flex: 1 1 auto; min-width: 0;">
+                    {_t_logo_html}<div style="flex: 1 1 auto; min-width: 0;">
                         <div style="
                             font-family: 'Inter', -apple-system, sans-serif;
                             font-size: 16px;

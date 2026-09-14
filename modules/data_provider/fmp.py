@@ -11,6 +11,12 @@ import pandas as pd
 
 _BASE = "https://financialmodelingprep.com"
 
+# tastytrade cotiza opciones de índices cash con el símbolo pelado (SPX), pero FMP
+# guarda el índice con prefijo ^ y devuelve [] para el símbolo pelado.
+# ponytail: solo índices verificados con datos en el plan actual de FMP. ^NDX da 402
+# (premium) y "NDX" pelado trae datos congelados en 2023: no mapear sin subir de plan.
+_FMP_INDEX_SYMBOLS = {"SPX": "^GSPC", "RUT": "^RUT"}
+
 
 def _get(url: str, params: dict, retries: int = 3, backoff: float = 1.0) -> dict | list:
     """GET con reintentos. Devuelve el JSON parseado."""
@@ -55,7 +61,7 @@ def fetch_quote_history(
     """
     url = f"{_BASE}/stable/historical-price-eod/full"
     params = {
-        "symbol": ticker.upper(),
+        "symbol": _FMP_INDEX_SYMBOLS.get(ticker.upper(), ticker.upper()),
         "apikey": api_key,
     }
 
