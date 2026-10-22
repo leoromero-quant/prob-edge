@@ -52,3 +52,12 @@ def test_la_etiqueta_distingue_las_tres_clases():
 def test_la_etiqueta_marca_hoy_y_vencido():
     assert "0 DTE (hoy)" in EX.etiqueta("2026-09-01", 0)
     assert "vencido" in EX.etiqueta("2026-08-28", -4)
+
+
+def test_cobertura_de_strikes():
+    """Casos medidos el 22 de octubre de 2026 con SPY en 763 y QQQ en 704."""
+    assert not EX.cubre(730, 820, 763.2, 43)     # SPY 12-04 semanal recien listado
+    assert not EX.cubre(710, 745, 704.5, 43)     # QQQ 12-04: spot debajo de todo
+    assert EX.cubre(300, 1000, 763.2, 29)        # SPY 11-20 mensual
+    assert EX.cubre(150, 1000, 763.2, 57)        # SPY 12-18 trimestral
+    assert not EX.cubre(650, 900, 763.2, 43, sigma=0.60)  # vol alta pide mas ancho

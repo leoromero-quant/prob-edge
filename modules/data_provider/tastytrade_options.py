@@ -219,6 +219,29 @@ def fetch_available_expiries(ticker: str, tt_token: str) -> list[str]:
     return sorted(set(dates))
 
 
+def fetch_strike_ranges(ticker: str, tt_token: str) -> dict[str, tuple[float, float]]:
+    """
+    Strike minimo y maximo LISTADOS por vencimiento: {'YYYY-MM-DD': (kmin, kmax)}.
+
+    Un semanal recien listado trae pocos strikes alrededor del precio del dia en
+    que se listo (medido el 22 de octubre de 2026: SPY 2026-12-04 con 42 strikes
+    de 730 a 820, contra 258 del trimestral). Con eso la densidad no tiene colas
+    y el cono sale estrecho, asi que el selector necesita saberlo antes de
+    elegir el vencimiento por defecto.
+    """
+    url = f"{_TT_API}/option-chains/{ticker.upper()}/nested"
+    req = urllib.request.Request(url, headers={"Authorization": tt_token})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        data = json.loads(r.read())
+    items = data.get("data", {}).get("items", [])
+    out: dict[str, tuple[float, float]] = {}
+    for exp in (items[0].get("expirations", []) if items else []):
+        ks = [float(s["strike-price"]) for s in exp.get("strikes", []) if s.get("strike-price")]
+        if ks and "expiration-date" in exp:
+            out[exp["expiration-date"]] = (min(ks), max(ks))
+    return out
+
+
 # ── Snapshot de opciones vía dxFeed ──────────────────────────────────────────
 
 def _get_nested_strikes(ticker: str, expiry: str, tt_token: str) -> list[dict]:

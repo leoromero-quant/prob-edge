@@ -24,6 +24,8 @@ cuando el viernes cae en un feriado conocido.
 """
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 MENSUAL = "mensual"
@@ -77,3 +79,24 @@ def etiqueta(fecha, dte: int | None = None) -> str:
     if dte == 0:
         return f"{marca} {fecha_txt}  ·  0 DTE (hoy)  ·  {clase}"
     return f"{marca} {fecha_txt}  ·  {dte} DTE  ·  {clase}"
+
+
+# Volatilidad supuesta para juzgar cobertura ANTES de bajar la cadena, cuando
+# todavia no hay IV. Es un piso de indice: SPY y QQQ viven entre 12% y 25%.
+# ponytail: constante, en nombres de vol alta subestima el ancho; el aviso
+# posterior a la carga usa la IV ATM real de la cadena y cubre ese caso.
+SIGMA_SUPUESTA = 0.25
+
+
+def cubre(kmin: float, kmax: float, spot: float, dte: int,
+          sigma: float = SIGMA_SUPUESTA, n_sigmas: float = 2.0) -> bool:
+    """
+    True si los strikes listados alcanzan +-n_sigmas en log-precio al vencimiento.
+
+    Sin esa cobertura la densidad no tiene datos en las colas: el motor legacy
+    las corta y el cono sale estrecho, y el forward las extrapola o no ajusta.
+    """
+    if spot <= 0 or dte <= 0:
+        return True
+    h = n_sigmas * sigma * math.sqrt(dte / 365.0)
+    return kmin <= spot * math.exp(-h) and kmax >= spot * math.exp(h)

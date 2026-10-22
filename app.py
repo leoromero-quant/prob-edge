@@ -14,6 +14,7 @@ import streamlit as st
 from assets.config.settings import settings
 from modules.data_provider.tastytrade_options import (
     fetch_available_expiries,
+    fetch_strike_ranges,
     fetch_options_snapshot,
     get_spot_price as tt_spot_price,
     _get_tt_token,
@@ -141,6 +142,11 @@ def cached_spot(ticker: str) -> dict:
 def cached_expiries(ticker: str):
     tt_token = _get_tt_token()
     return fetch_available_expiries(ticker, tt_token)
+
+
+@st.cache_data(ttl=300)
+def cached_strike_ranges(ticker: str):
+    return fetch_strike_ranges(ticker, _get_tt_token())
 
 
 # TTL de la cadena. Medido el 2 de septiembre de 2026: cada cadena cuesta 2.3 s
@@ -610,6 +616,8 @@ def render_densidades(ticker: str):
                 available_expiries = []
 
         if available_expiries:
+            from modules import expiraciones as _exp_mod
+
             # Reloj de Nueva York, no el de la maquina. El DTE de un
             # vencimiento es un hecho del mercado, y en un servidor en UTC el
             # dia cambia a las 19:00 hora de Nueva York: el 0DTE aparecia como
@@ -623,22 +631,30 @@ def render_densidades(ticker: str):
                 except Exception:
                     expiry_dates.append(None)
 
-            best_idx = None
-            best_distance = None
-            for idx, dt in enumerate(expiry_dates):
-                if dt is None:
-                    continue
-                days = (dt - today).days
-                # Default del vencimiento: el mas cercano a 45 dias. Decidido el
-                # 1 de septiembre de 2026: 45 dias es el ancla estandar de mesa
-                # para venta de prima, y es la misma que usa el ranking para el
-                # sesgo a 25 deltas.
-                if days < 21 or days > 75:
-                    continue
-                distance = abs(days - 45)
-                if best_distance is None or distance < best_distance:
-                    best_distance = distance
-                    best_idx = idx
+            # Default del vencimiento: el mas cercano a 45 dias. Decidido el
+            # 1 de septiembre de 2026: 45 dias es el ancla estandar de mesa
+            # para venta de prima, y es la misma que usa el ranking para el
+            # sesgo a 25 deltas.
+            candidatos = sorted(
+                (abs((dt - today).days - 45), idx)
+                for idx, dt in enumerate(expiry_dates)
+                if dt is not None and 21 <= (dt - today).days <= 75
+            )
+            best_idx = candidatos[0][1] if candidatos else None
+            # 22 de octubre de 2026: el mas cercano a 45 dias era un semanal
+            # recien listado con strikes de 730 a 820 (SPY en 763) y el cono
+            # salia a la mitad de su ancho. Se toma el primer candidato cuyos
+            # strikes cubren +-2 sigmas. Sin spot o sin rangos, queda el de 45.
+            try:
+                _rangos = cached_strike_ranges(ticker)
+                _spot_sel = float(cached_spot(ticker)[ticker]["price"])
+                for _, idx in candidatos:
+                    rg = _rangos.get(available_expiries[idx])
+                    if rg and _exp_mod.cubre(*rg, _spot_sel, (expiry_dates[idx] - today).days):
+                        best_idx = idx
+                        break
+            except Exception:
+                pass
 
             if best_idx is None:
                 for idx, dt in enumerate(expiry_dates):
@@ -655,8 +671,6 @@ def render_densidades(ticker: str):
             for s, dt in zip(available_expiries, expiry_dates):
                 if dt is not None:
                     dte_by_expiry[s] = (dt - today).days
-
-            from modules import expiraciones as _exp_mod
 
             def _fmt_expiry(s: str) -> str:
                 """
@@ -721,16 +735,18 @@ def render_densidades(ticker: str):
 
         # ── Interruptor de motor de densidad ───────────────────────────────
         # Default desde el entorno (PROBEDGE_RND), sobreescribible en vivo para
-        # poder comparar los dos conos sin reiniciar. `legacy` es el default para
-        # que lo desplegado no cambie de comportamiento sin decision explicita.
+        # poder comparar los dos conos sin reiniciar. `forward` es el default
+        # desde el 22 de octubre de 2026: legacy corta las colas con cadena
+        # corta y se desboca con alas iliquidas en cadena larga (QQQ 12-18 dio
+        # una mediana 5% bajo el spot, contra la martingala).
         # El selector de motor se dibuja arriba de la grafica, junto al
         # interruptor del heatmap, porque son los dos controles que cambian lo
         # que se ve. Aqui solo se fija el default y se lee el valor vigente:
         # Streamlit vuelve a correr el script completo al cambiarlo, asi que el
         # valor esta disponible antes de calcular la densidad.
-        _default_mode = os.getenv("PROBEDGE_RND", "legacy").strip().lower()
+        _default_mode = os.getenv("PROBEDGE_RND", "forward").strip().lower()
         if _default_mode not in rnd_bridge.MODES:
-            _default_mode = "legacy"
+            _default_mode = "forward"
         if "dens_engine" not in st.session_state:
             st.session_state["dens_engine"] = _default_mode
         rnd_mode = st.session_state["dens_engine"]
@@ -816,8 +832,28 @@ def render_densidades(ticker: str):
         st.warning(f"No options data for **{ticker}** expiry **{expiry_str}**. Try a different expiry.")
         st.stop()
 
+    # Aviso de cobertura con la IV ATM real de la cadena: un vencimiento
+    # elegido a mano, o un nombre de vol alta, puede no tener strikes en las
+    # colas aunque el default si los tenga.
+    try:
+        from modules import expiraciones as _exp_mod
+        _ks = options_df["strike"]
+        _atm = options_df.loc[(_ks - spot).abs() == (_ks - spot).abs().min(), "iv"].mean()
+        _dte = int((expiry_date - valuation_date).days)
+        if pd.notna(_atm) and _atm > 0 and not _exp_mod.cubre(_ks.min(), _ks.max(), spot, _dte, sigma=float(_atm)):
+            _h = 2 * float(_atm) * np.sqrt(max(_dte, 1) / 365.0)
+            st.warning(
+                f"Cobertura de strikes corta: **{expiry_str}** lista strikes de "
+                f"{_ks.min():g} a {_ks.max():g}, y +-2 sigmas con IV ATM "
+                f"{_atm:.1%} piden de {spot * np.exp(-_h):.0f} a {spot * np.exp(_h):.0f}. "
+                f"Las colas del cono salen del modelo, no del mercado. Usa un "
+                f"mensual (◆) o trimestral (★)."
+            )
+    except Exception:
+        pass
+
     # La densidad la produce `rnd_bridge`, que envuelve los dos motores y los
-    # expone con el interruptor legacy/forward de la barra lateral. El registro
+    # expone con el interruptor legacy/forward de arriba de la grafica. El registro
     # `get_density_producer` de modules.utils sigue existiendo y da el mismo
     # resultado que el modo legacy; unificarlos es trabajo aparte, no de esta
     # fusion, porque el bridge ademas devuelve los diagnosticos que consume el
@@ -831,8 +867,9 @@ def render_densidades(ticker: str):
     except Exception as e:
         st.error(f"Could not build RND ({rnd_mode}): {e}")
         if rnd_mode == "forward":
-            st.info("Cambia el motor a `legacy` en la barra lateral para seguir "
-                    "trabajando mientras se revisa la cadena de este vencimiento.")
+            st.info("Elige un vencimiento mensual (◆) o trimestral (★): suelen "
+                    "listar strikes en las colas. `legacy` no es salida aqui, con "
+                    "cadena corta recorta las colas y el cono sale estrecho.")
         st.stop()
 
     rnd_by_date = {pd.Timestamp(expiry_date): (K_grid, pdf_K)}
@@ -1224,7 +1261,7 @@ def render_densidades(ticker: str):
         if rnd_diag.get("mode") == "legacy":
             st.caption(rnd_diag.get("nota", ""))
             st.caption(
-                "Cambia el motor a `forward` en la barra lateral para ver el cono "
+                "Cambia el motor a `forward` arriba de la grafica para ver el cono "
                 "con la densidad corregida y sus diagnosticos."
             )
         else:
