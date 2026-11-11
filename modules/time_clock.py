@@ -120,11 +120,16 @@ def time_to_expiry(now, expiry, overnight: float = OVERNIGHT,
     cl = sch["market_close"].dt.tz_convert(TZ)
 
     exp_day = exp.normalize().tz_localize(None)
+    # Plazo de calendario hasta la LIQUIDACION (cierre, o apertura si settle="open"),
+    # no hasta la medianoche del dia de vencimiento. Antes del 2026-11-11 se media
+    # contra `exp` a las 00:00 y se quedaba corto por 16 horas.
+    exp_settle = _settle_time(exp, exp_day, op, cl, settle)
+    T_cal_settle = max((exp_settle - now).total_seconds() / (365.25 * 86400), 1e-9)
     dias = sch.index[(sch.index >= now.normalize().tz_localize(None)) &
                      (sch.index <= exp_day)]
     if len(dias) == 0:
         return {"T": 1e-6, "units": 0.0, "sessions": 0,
-                "T_calendar": max((exp - now).total_seconds() / (365.25 * 86400), 1e-9),
+                "T_calendar": T_cal_settle,
                 "overnight": overnight, "expired": True}
 
     unidades = 0.0
@@ -149,16 +154,39 @@ def time_to_expiry(now, expiry, overnight: float = OVERNIGHT,
     # no queda tiempo, y eso es lo que importa.
     if unidades <= 0:
         return {"T": 1e-9, "units": 0.0, "sessions": int(len(dias)),
-                "T_calendar": float(max((exp - now).total_seconds() / (365.25 * 86400), 1e-9)),
+                "T_calendar": float(T_cal_settle),
                 "overnight": overnight, "expired": True, "settle": settle}
 
     T = max(unidades / TRADING_DAYS_YEAR, 1e-9)
     return {
         "T": float(T), "units": float(unidades), "sessions": int(len(dias)),
-        "T_calendar": float(max((exp - now).total_seconds() / (365.25 * 86400), 1e-9)),
+        "T_calendar": float(T_cal_settle),
         "overnight": overnight, "expired": False,
         "settle": settle,
     }
+
+
+def _settle_time(exp, exp_day, op, cl, settle: str):
+    """Hora de liquidacion del vencimiento: cierre (o apertura) real del calendario."""
+    try:
+        return (op if settle == "open" else cl).loc[exp_day]
+    except KeyError:
+        h = 9.5 if settle == "open" else 16.0
+        return exp.normalize() + pd.Timedelta(hours=h)
+
+
+def calendar_T(now, expiry, settle: str = "close") -> float:
+    """
+    Plazo en anios de CALENDARIO (365.25) desde `now` hasta la liquidacion.
+
+    Es el reloj con el que cotizan la IV dxFeed, ORATS y la libreria de Tradier
+    (verificado el 2026-11-11: T implicito en la IV de cada proveedor contra el
+    plazo de calendario, razon 0.99 a 1.03). Cualquier calculo que combine esa
+    IV con un plazo (w = iv^2 T, gamma, densidad) debe usar ESTE T. El reloj de
+    negocio de `time_to_expiry` reparte la varianza entre sesiones; mezclarlo con
+    una IV de calendario cambia la varianza total que el mercado cotiza.
+    """
+    return float(time_to_expiry(now, expiry, settle=settle)["T_calendar"])
 
 
 def estimate_overnight(ohlc: pd.DataFrame) -> dict | None:

@@ -52,7 +52,7 @@ def to_rnd_frame(options_df: pd.DataFrame) -> pd.DataFrame:
 
 def density(options_df, spot: float, valuation_date, expiry_date,
             r_annual: float = 0.0, q_annual: float = 0.0,
-            mode: str = "legacy") -> tuple[np.ndarray, np.ndarray, dict]:
+            mode: str = "legacy", T: float | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
     """
     Devuelve (K_grid, pdf_K, diagnosticos). `diagnosticos` trae `mode` siempre, y
     en modo forward los indicadores que permiten auditar la densidad antes de
@@ -61,7 +61,14 @@ def density(options_df, spot: float, valuation_date, expiry_date,
     if mode not in MODES:
         raise ValueError(f"modo desconocido {mode!r}; use uno de {MODES}")
     val, exp = pd.Timestamp(valuation_date), pd.Timestamp(expiry_date)
-    T = max((exp - val).days / 365.25, 1e-6)
+    # `T` explicito: plazo de calendario hasta la liquidacion, el mismo reloj con
+    # el que el proveedor cotiza la IV (time_clock.calendar_T). Sin el, se usa el
+    # conteo de dias enteros, que ignora la hora: medido el 2026-11-11, angosta la
+    # densidad de un vencimiento de manana 11% a las 09:45 y la colapsa en 0DTE
+    # (T = 1e-6, desviacion 25 veces menor que la del mercado).
+    if T is None:
+        T = max((exp - val).days / 365.25, 1e-6)
+    T = float(max(T, 1e-6))
 
     if mode == "legacy":
         clean = build_clean_calls_from_chain(options_df, S0=spot, valuation_date=val,
