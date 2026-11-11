@@ -1,6 +1,6 @@
 """
 api/routes/options.py
-Endpoints de opciones — tastytrade + dxFeed + RND via Breeden-Litzenberger.
+Endpoints de opciones: proveedor en vivo (DATA_PROVIDER: tastytrade o tradier) + RND via Breeden-Litzenberger.
 """
 from __future__ import annotations
 
@@ -17,12 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from modules.data_provider.tastytrade_options import (
-    fetch_available_expiries,
-    fetch_options_snapshot,
-    get_spot_price,
-    _get_tt_token,
-)
+from modules.data_provider.options_provider import get_options_provider
 from modules.utils import get_density_producer
 from api.auth.dependencies import get_current_user
 from api.auth.models import User
@@ -71,20 +66,20 @@ async def _prepare_rnd_data(
             ),
         )
 
-    tt_token = await asyncio.to_thread(_get_tt_token)
+    provider = get_options_provider()
 
     if not expiration:
-        expiries = await asyncio.to_thread(fetch_available_expiries, ticker.upper(), tt_token)
+        expiries = await asyncio.to_thread(provider.fetch_available_expiries, ticker.upper())
         if not expiries:
             raise HTTPException(status_code=404, detail=f"No hay vencimientos para {ticker}")
         expiration = expiries[0]
 
     try:
-        spot = await asyncio.to_thread(get_spot_price, ticker.upper(), tt_token)
+        spot = await asyncio.to_thread(provider.get_spot_price, ticker.upper())
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Error dxFeed (spot): {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Error {provider.name} (spot): {exc}") from exc
 
-    df = await asyncio.to_thread(fetch_options_snapshot, ticker.upper(), expiration, tt_token)
+    df = await asyncio.to_thread(provider.fetch_options_snapshot, ticker.upper(), expiration)
     if df.empty:
         raise HTTPException(status_code=404, detail=f"Sin datos para {ticker} exp {expiration}")
 
@@ -126,11 +121,11 @@ async def get_expiries(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        tt_token = await asyncio.to_thread(_get_tt_token)
-        expiries = await asyncio.to_thread(fetch_available_expiries, ticker.upper(), tt_token)
+        provider = get_options_provider()
+        expiries = await asyncio.to_thread(provider.fetch_available_expiries, ticker.upper())
         return {"ticker": ticker.upper(), "expiries": expiries, "count": len(expiries)}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Error tastytrade API: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Error {os.getenv('DATA_PROVIDER', 'tastytrade')} API: {exc}") from exc
 
 
 @router.get("/{ticker}/chain", dependencies=[Depends(rate_limit_dependency)])
@@ -141,14 +136,14 @@ async def get_options_chain(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        tt_token = await asyncio.to_thread(_get_tt_token)
+        provider = get_options_provider()
         if not expiration:
-            expiries = await asyncio.to_thread(fetch_available_expiries, ticker.upper(), tt_token)
+            expiries = await asyncio.to_thread(provider.fetch_available_expiries, ticker.upper())
             if not expiries:
                 raise HTTPException(status_code=404, detail=f"No hay vencimientos para {ticker}")
             expiration = expiries[0]
 
-        df = await asyncio.to_thread(fetch_options_snapshot, ticker.upper(), expiration, tt_token)
+        df = await asyncio.to_thread(provider.fetch_options_snapshot, ticker.upper(), expiration)
         if df.empty:
             raise HTTPException(status_code=404, detail=f"Sin datos para {ticker} exp {expiration}")
 

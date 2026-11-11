@@ -116,7 +116,13 @@ def compute(chains: dict, spot: float, symbol: str, Ts: dict,
             forwards: dict | None = None, regime: str = "sticky_delta") -> dict:
     """
     Calcula el panel para cada plazo. `chains` es {etiqueta: DataFrame}, `Ts` los
-    plazos en anios de tiempo de negocio.
+    plazos en anios de CALENDARIO hasta la liquidacion (time_clock.calendar_T).
+
+    Cambio del 2026-11-11: antes se pasaba el reloj de negocio. La gamma depende de
+    la varianza total w = iv^2 T, y la IV del proveedor esta anualizada en
+    calendario; con T de negocio la w se inflaba 43% a 51% a uno o dos dias y la
+    gamma en el dinero salia 10% a 16% baja (GEX neto SPY 1DTE 624 M contra 687 M
+    de referencia medida desde precios).
 
     Funcion pura: no toca Streamlit, para poder probarla sin levantar la app.
     """

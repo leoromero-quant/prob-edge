@@ -12,14 +12,8 @@ import pandas as pd
 import streamlit as st
 
 from assets.config.settings import settings
-from modules.data_provider.tastytrade_options import (
-    fetch_available_expiries,
-    fetch_strike_ranges,
-    fetch_options_snapshot,
-    get_spot_price as tt_spot_price,
-    _get_tt_token,
-)
-from modules.data_provider.dxfeed_quotes import get_quotes_from_env
+# Proveedor de opciones en vivo: DATA_PROVIDER=tastytrade (default) | tradier.
+from modules.data_provider.options_provider import get_options_provider, provider_name
 from modules.data_provider.fmp import fetch_quote_history as fmp_quote_history
 from modules.utils import (
     build_time_price_density,
@@ -102,8 +96,31 @@ def cached_quotes(ticker: str, range_code: str, fmp_api_key: str, cache_day: str
     return fmp_quote_history(ticker, fmp_api_key, days=days)
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+# Fuente de opciones activa. El switch de la barra lateral la guarda en
+# st.session_state["data_provider"]; sin switch manda DATA_PROVIDER. Cada cache
+# de datos de opciones lleva la fuente en la llave, para que cambiar el switch
+# nunca muestre una cadena de la otra fuente.
+PROVIDER_LABELS = {"tastytrade": "tastytrade", "tradier": "Tradier"}
+
+
+def active_provider_name() -> str:
+    try:
+        val = st.session_state.get("data_provider")
+    except Exception:
+        val = None
+    return val if val in PROVIDER_LABELS else provider_name()
+
+
+def active_provider():
+    return get_options_provider(active_provider_name())
+
+
 def cached_svi_fit(ticker: str, expiry: str, spot_key: float, T: float):
+    return _cached_svi_fit(active_provider_name(), ticker, expiry, spot_key, T)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_svi_fit(provider: str, ticker: str, expiry: str, spot_key: float, T: float):
     """
     Ajuste SVI y forward de un vencimiento, cacheados.
 
@@ -116,7 +133,7 @@ def cached_svi_fit(ticker: str, expiry: str, spot_key: float, T: float):
     cuando el precio se mueve de verdad y no cuando el usuario toca un control.
     """
     from modules import rnd_forward as _rf
-    df = cached_options(ticker, expiry)
+    df = _cached_options(provider, ticker, expiry)
     if df is None or df.empty:
         return None, None
     r = rnd_bridge.to_rnd_frame(df)
@@ -127,26 +144,37 @@ def cached_svi_fit(ticker: str, expiry: str, spot_key: float, T: float):
     return (sm or {}).get("svi"), res["forward"]
 
 
-@st.cache_data(ttl=30)
 def cached_spot(ticker: str) -> dict:
+    return _cached_spot(active_provider_name(), ticker)
+
+
+@st.cache_data(ttl=30)
+def _cached_spot(provider: str, ticker: str) -> dict:
     """
     Spot en vivo, cacheado 30 s. Sin cache costaba 1.3 s de WebSocket en CADA
     rerun de Streamlit, o sea en cada clic de cualquier control de la pagina,
     incluido encender el heatmap. Treinta segundos es mucho mas fresco que la
     fuente, que llega diferida quince minutos.
     """
-    return get_quotes_from_env([ticker])
+    return get_options_provider(provider).get_quotes([ticker])
 
 
-@st.cache_data(ttl=300)
 def cached_expiries(ticker: str):
-    tt_token = _get_tt_token()
-    return fetch_available_expiries(ticker, tt_token)
+    return _cached_expiries(active_provider_name(), ticker)
 
 
 @st.cache_data(ttl=300)
+def _cached_expiries(provider: str, ticker: str):
+    return get_options_provider(provider).fetch_available_expiries(ticker)
+
+
 def cached_strike_ranges(ticker: str):
-    return fetch_strike_ranges(ticker, _get_tt_token())
+    return _cached_strike_ranges(active_provider_name(), ticker)
+
+
+@st.cache_data(ttl=300)
+def _cached_strike_ranges(provider: str, ticker: str):
+    return get_options_provider(provider).fetch_strike_ranges(ticker)
 
 
 # TTL de la cadena. Medido el 2 de septiembre de 2026: cada cadena cuesta 2.3 s
@@ -158,10 +186,13 @@ def cached_strike_ranges(ticker: str):
 TTL_CADENAS = int(os.getenv("PROBEDGE_TTL_CADENAS", "900"))
 
 
-@st.cache_data(ttl=TTL_CADENAS)
 def cached_options(ticker: str, expiry: str):
-    tt_token = _get_tt_token()
-    df = fetch_options_snapshot(ticker, expiry, tt_token)
+    return _cached_options(active_provider_name(), ticker, expiry)
+
+
+@st.cache_data(ttl=TTL_CADENAS)
+def _cached_options(provider: str, ticker: str, expiry: str):
+    df = get_options_provider(provider).fetch_options_snapshot(ticker, expiry)
     if df.empty:
         return df
     df = df.rename(columns={
@@ -576,11 +607,21 @@ def render_densidades(ticker: str):
         st.error("FMP API key is not configured. Set FMP_API_KEY in your .env.")
         st.stop()
     try:
-        _get_tt_token()
+        active_provider().check_connection()
     except Exception as _tt_err:
         import os as _os
         def _ck(k: str) -> str:
             return "✅" if _os.environ.get(k) else "❌"
+        if active_provider().name == "tradier":
+            st.error(
+                "⚠️ Could not connect to Tradier.\n\n"
+                f"TRADIER_ENV={_os.environ.get('TRADIER_ENV', 'production')} | "
+                f"TRADIER_TOKEN_PROD {_ck('TRADIER_TOKEN_PROD')} | "
+                f"TRADIER_TOKEN_SANDBOX {_ck('TRADIER_TOKEN_SANDBOX')}\n\n"
+                "A sandbox token used against production (or the reverse) returns 401.\n\n"
+                f"Error: {_tt_err}"
+            )
+            st.stop()
         st.error(
             "⚠️ Could not connect to tastytrade.\n\n"
             f"OAuth Personal Grant: "
@@ -772,7 +813,7 @@ def render_densidades(ticker: str):
     show_heatmap = st.session_state["chk_density_heatmap"]
 
     hist_sigma_rel = float(settings.HIST_SIGMA_REL)
-    st.caption("Data: tastytrade (options · real-time) · FMP (historical OHLCV)")
+    st.caption(f"Data: {active_provider().label} · FMP (historical OHLCV)")
     # Declarar la proporcion entre lo descargado y lo dibujado. Sin esto no hay
     # forma de notar que se estan pidiendo cinco anios para mostrar sesenta
     # dias, que es lo que estaba pasando.
@@ -859,10 +900,14 @@ def render_densidades(ticker: str):
     # fusion, porque el bridge ademas devuelve los diagnosticos que consume el
     # panel de auditoria.
     try:
+        from modules import time_clock as _tc_d
+        # Plazo de calendario desde AHORA hasta el cierre del vencimiento: el reloj
+        # con el que viene cotizada la IV (auditoria 2026-11-11).
+        _T_dens = _tc_d.calendar_T(pd.Timestamp.now(tz="America/New_York"), expiry_date)
         K_grid, pdf_K, rnd_diag = rnd_bridge.density(
             options_df, spot=spot, valuation_date=valuation_date,
             expiry_date=expiry_date, r_annual=r_rate, q_annual=q_rate,
-            mode=rnd_mode,
+            mode=rnd_mode, T=_T_dens,
         )
     except Exception as e:
         st.error(f"Could not build RND ({rnd_mode}): {e}")
@@ -1080,7 +1125,9 @@ def render_densidades(ticker: str):
                 if _tk["expired"]:
                     continue
                 _gex_chains[_etiq] = _df
-                _gex_Ts[_etiq] = _tk["T"]
+                # Calendario, no negocio: la IV viene anualizada en calendario y la
+                # gamma depende de w = iv^2 T (auditoria 2026-11-11).
+                _gex_Ts[_etiq] = _tk["T_calendar"]
                 _gex_exps[_etiq] = _exp
                 # El ajuste SVI solo se necesita para la correccion de sonrisa,
                 # que se aplica al plazo principal. Con dieciseis vencimientos,
@@ -1091,7 +1138,7 @@ def render_densidades(ticker: str):
                     continue
                 try:
                     _fit, _fwd = cached_svi_fit(ticker, str(_exp.date()),
-                                                round(float(spot), 2), float(_tk["T"]))
+                                                round(float(spot), 2), float(_tk["T_calendar"]))
                     if _fit is not None:
                         _gex_fits[_etiq] = _fit
                         _gex_fwds[_etiq] = _fwd
@@ -1539,6 +1586,20 @@ def main():
             help="Ticker driving the chart and the company snapshot.",
         ).upper().strip()
 
+        # Switch de fuente de opciones (cadenas y spot). Se oculta con
+        # PROBEDGE_SHOW_SOURCE_SWITCH=0; entonces manda DATA_PROVIDER.
+        if os.getenv("PROBEDGE_SHOW_SOURCE_SWITCH", "1") != "0":
+            if st.session_state.get("data_provider") not in PROVIDER_LABELS:
+                st.session_state["data_provider"] = provider_name()
+            st.radio(
+                "Options data source",
+                options=list(PROVIDER_LABELS),
+                format_func=lambda n: PROVIDER_LABELS[n],
+                key="data_provider",
+                horizontal=True,
+                help="Source for option chains and spot. Each source keeps its own cache.",
+            )
+
         # Company name + short profile (FMP). Cached → only one call per ticker.
         # Renders silently if FMP key or profile is unavailable, so the sidebar
         # never breaks for unsupported tickers (e.g. some indices/futures).
@@ -1589,7 +1650,7 @@ def main():
     # Pie del sidebar (al final, después de toda la página principal).
     with st.sidebar:
         st.divider()
-        st.caption("Data: FMP · tastytrade · Anthropic Claude")
+        st.caption(f"Data: FMP · {PROVIDER_LABELS[active_provider_name()]} · Anthropic Claude")
         # Marcador de build: en Render muestra el SHA desplegado (RENDER_GIT_COMMIT),
         # en local muestra "local". Sirve para verificar qué commit está vivo.
         _build = os.getenv("RENDER_GIT_COMMIT", "")[:7] or "local"

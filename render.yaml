@@ -11,6 +11,12 @@ services:
         sync: false
       - key: TASTYTRADE_REFRESH_TOKEN
         sync: false
+      - key: DATA_PROVIDER
+        value: tastytrade
+      - key: TRADIER_ENV
+        value: production
+      - key: TRADIER_TOKEN_PROD
+        sync: false
       - key: FMP_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
@@ -36,6 +42,12 @@ services:
       - key: TASTYTRADE_CLIENT_SECRET
         sync: false
       - key: TASTYTRADE_REFRESH_TOKEN
+        sync: false
+      - key: DATA_PROVIDER
+        value: tastytrade
+      - key: TRADIER_ENV
+        value: production
+      - key: TRADIER_TOKEN_PROD
         sync: false
       - key: FMP_API_KEY
         sync: false
