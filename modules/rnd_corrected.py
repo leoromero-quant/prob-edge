@@ -88,9 +88,13 @@ def _otm_smile(chain: pd.DataFrame, forward: float):
     """
     c = chain.dropna(subset=["iv"])
     c = c[c["iv"] > 0]
+    # Primera letra en minuscula: el backtest trae "call"/"put" y las cadenas en vivo
+    # (Tradier, tastytrade) "C"/"P". Comparar contra "put" dejaba la cadena en vivo sin
+    # un solo OTM y caia en silencio al promedio de todas las IV.
+    t = c["option_type"].astype(str).str.strip().str.lower().str[0]
     otm = pd.concat([
-        c[(c["option_type"] == "put") & (c["strike"] < forward)],
-        c[(c["option_type"] == "call") & (c["strike"] >= forward)],
+        c[(t == "p") & (c["strike"] < forward)],
+        c[(t == "c") & (c["strike"] >= forward)],
     ])
     if otm.empty:  # fall back to whatever iv exists
         otm = c
@@ -98,18 +102,33 @@ def _otm_smile(chain: pd.DataFrame, forward: float):
     return g["strike"].to_numpy(dtype=float), g["iv"].to_numpy(dtype=float)
 
 
-def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
-                  q_annual=0.0, n_grid: int = 400, sigma_span: float = 5.0,
-                  smile: str = "svi", **_ignore):
+def corrected_density(chain, spot, valuation_date, expiry_date, r_annual=0.045,
+                      q_annual=0.0, n_grid: int = 400, sigma_span: float = 5.0,
+                      smile: str = "svi", T: float | None = None,
+                      adaptive_tails: bool = True, tail_tol: float = 1e-4, **_ignore):
     """
-    (chain, spot, valuation_date, expiry_date, r, q) -> (K_grid, pdf), same
-    producer contract as `bl`. Risk-neutral extraction via a fitted IV smile.
+    Motor `corrected` con diagnosticos: (K_grid, pdf, info). Es la misma matematica que
+    `corrected_rnd` (el producto validado en el backtest de 12 meses); solo agrega:
 
-    smile="svi" (default): raw-SVI total-variance fit with LINEAR (no-arb) wings,
-    fixing the flat-wing extrapolation that left a 95%-tail gap. Falls back to a
-    quadratic smile with flat wings if SVI can't be fit (<5 strikes / solver fail).
+      - `T` explicito: plazo de calendario hasta la liquidacion, el reloj con el que
+        cotiza la IV el proveedor (time_clock.calendar_T). Sin `T` se usan dias
+        enteros / 365.25, exactamente como en el backtest.
+      - `info` para auditar la densidad en vivo: forward teorico, IV ATM de la sonrisa,
+        si SVI ajusto o se cayo a la cuadratica, puntos de sonrisa, cobertura en
+        sigmas, masa fuera de los strikes observados, martingala y dispersion contra
+        la lognormal de la misma IV ATM.
+      - `adaptive_tails` (default desde el 2026-11-17): la malla de ~5 sigmas ATM corta
+        la cola izquierda cuando hay sesgo de puts, porque la volatilidad local del ala
+        es mucho mayor que la ATM. En las 72 cadenas del backtest faltaba una mediana
+        de 0.36% de la masa (sesgo de la media +9 pb, maximo +63 pb; en SPY en vivo
+        +18.8 pb). La masa que queda fuera se lee en los bordes: 1 + dC~/dK en el
+        izquierdo y -dC~/dK en el derecho; la malla se extiende del lado que falta hasta
+        dejar menos de `tail_tol`, conservando el paso. `adaptive_tails=False`
+        reproduce exactamente la version del reporte de 12 meses.
     """
-    T = max((pd.Timestamp(expiry_date) - pd.Timestamp(valuation_date)).days / _YEAR, 1e-6)
+    if T is None:
+        T = max((pd.Timestamp(expiry_date) - pd.Timestamp(valuation_date)).days / _YEAR, 1e-6)
+    T = float(max(T, 1e-6))
     F = spot * math.exp((r_annual - q_annual) * T)
 
     K_obs, iv_obs = _otm_smile(chain, F)
@@ -127,32 +146,89 @@ def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
         coeffs = np.polyfit(x_obs, iv_obs, 2 if K_obs.size >= 3 else 1)
         sig_atm = max(float(np.polyval(coeffs, 0.0)), 1e-3)
 
+    def _bl(K_grid):
+        x_grid = np.log(K_grid / F)
+        if svi is not None:
+            # SVI extrapolates with linear-variance (no-arb) wings — evaluate on the
+            # full grid, no clamping.
+            w_grid = np.clip(_svi_total_var(svi, x_grid), 1e-10, None)
+            iv_grid = np.clip(np.sqrt(w_grid / T), 1e-3, 5.0)
+        else:
+            # flat-wing: clamp log-moneyness to observed range before the quadratic
+            iv_grid = np.clip(np.polyval(coeffs, np.clip(x_grid, x_lo, x_hi)), 1e-3, 5.0)
+        # Reconstruct undiscounted call prices, then Breeden-Litzenberger.
+        C = _bs_call_vec(spot, K_grid, T, r_annual, q_annual, iv_grid)
+        C_tilde = C * math.exp(r_annual * T)  # = E_Q[(S_T - K)+]
+        d1 = np.gradient(C_tilde, K_grid)
+        return np.clip(np.gradient(d1, K_grid), 0.0, None), d1
+
     # ~5-sigma grid so the tails vanish inside the support (no strike truncation).
     half = sigma_span * sig_atm * math.sqrt(T)
     K_lo = min(F * math.exp(-half), float(K_obs.min()))
     K_hi = max(F * math.exp(+half), float(K_obs.max()))
     K_grid = np.linspace(K_lo, K_hi, n_grid)
-    x_grid = np.log(K_grid / F)
+    pdf, d1 = _bl(K_grid)
 
-    if svi is not None:
-        # SVI extrapolates with linear-variance (no-arb) wings — evaluate on the
-        # full grid, no clamping.
-        w_grid = np.clip(_svi_total_var(svi, x_grid), 1e-10, None)
-        iv_grid = np.clip(np.sqrt(w_grid / T), 1e-3, 5.0)
-    else:
-        # flat-wing: clamp log-moneyness to observed range before the quadratic
-        iv_grid = np.clip(np.polyval(coeffs, np.clip(x_grid, x_lo, x_hi)), 1e-3, 5.0)
-
-    # Reconstruct undiscounted call prices, then Breeden-Litzenberger.
-    C = _bs_call_vec(spot, K_grid, T, r_annual, q_annual, iv_grid)
-    C_tilde = C * math.exp(r_annual * T)  # = E_Q[(S_T - K)+]
-    d1 = np.gradient(C_tilde, K_grid)
-    pdf = np.clip(np.gradient(d1, K_grid), 0.0, None)
+    tail_left, tail_right = max(1.0 + float(d1[0]), 0.0), max(-float(d1[-1]), 0.0)
+    extensions = 0
+    if adaptive_tails:
+        step = (K_hi - K_lo) / (n_grid - 1)
+        while (tail_left > tail_tol or tail_right > tail_tol) and extensions < 12:
+            if tail_left > tail_tol:
+                K_lo = max(K_lo - 0.5 * (F - K_lo), F * 1e-3)
+            if tail_right > tail_tol:
+                K_hi = K_hi + 0.5 * (K_hi - F)
+            n = int(min(max(round((K_hi - K_lo) / step) + 1, n_grid), 20000))
+            K_grid = np.linspace(K_lo, K_hi, n)
+            pdf, d1 = _bl(K_grid)
+            tail_left, tail_right = max(1.0 + float(d1[0]), 0.0), max(-float(d1[-1]), 0.0)
+            extensions += 1
 
     area = np.trapezoid(pdf, K_grid)
     if not np.isfinite(area) or area <= 0:
         raise ValueError("corrected_rnd produced a degenerate density.")
-    return K_grid, pdf / area
+    pdf = pdf / area
+
+    mean = float(np.trapezoid(K_grid * pdf, K_grid))
+    sd = float(math.sqrt(max(np.trapezoid((K_grid - mean) ** 2 * pdf, K_grid), 0.0)))
+    sd_logn = F * math.sqrt(max(math.exp(sig_atm ** 2 * T) - 1.0, 0.0))
+    s_unit = sig_atm * math.sqrt(T)
+    info = {
+        "T": T, "forward": F, "atm_iv": sig_atm,
+        "smile_model": "svi" if svi is not None else "quad",
+        "smile_points": int(K_obs.size),
+        "raw_integral": float(area),
+        "mean_vs_forward_bp": (mean / F - 1.0) * 1e4,
+        "sd_ratio_lognormal": sd / sd_logn if sd_logn > 0 else float("nan"),
+        "sigma_obs_low": x_lo / s_unit, "sigma_obs_high": x_hi / s_unit,
+        "mass_below_obs": float(np.trapezoid(np.where(K_grid < K_obs.min(), pdf, 0.0), K_grid)),
+        "mass_above_obs": float(np.trapezoid(np.where(K_grid > K_obs.max(), pdf, 0.0), K_grid)),
+        "tail_outside_left": tail_left, "tail_outside_right": tail_right,
+        "grid_extensions": extensions,
+    }
+    return K_grid, pdf, info
+
+
+def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
+                  q_annual=0.0, n_grid: int = 400, sigma_span: float = 5.0,
+                  smile: str = "svi", **_ignore):
+    """
+    (chain, spot, valuation_date, expiry_date, r, q) -> (K_grid, pdf), same
+    producer contract as `bl`. Risk-neutral extraction via a fitted IV smile.
+
+    smile="svi" (default): raw-SVI total-variance fit with LINEAR (no-arb) wings,
+    fixing the flat-wing extrapolation that left a 95%-tail gap. Falls back to a
+    quadratic smile with flat wings if SVI can't be fit (<5 strikes / solver fail).
+
+    Delegates to `corrected_density` with whole-day T. `adaptive_tails=False`
+    reproduces the 12-month report bit for bit (verified on the 72 frozen chains,
+    2026-11-17); the default extends the grid until the tails outside it are < 1e-4.
+    """
+    K_grid, pdf, _ = corrected_density(chain, spot, valuation_date, expiry_date,
+                                       r_annual=r_annual, q_annual=q_annual, n_grid=n_grid,
+                                       sigma_span=sigma_span, smile=smile,
+                                       adaptive_tails=_ignore.get("adaptive_tails", True))
+    return K_grid, pdf
 
 
 def corrected_rnd_quad(*args, **kwargs):
