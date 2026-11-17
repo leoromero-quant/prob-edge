@@ -21,6 +21,7 @@ from modules.utils import (
     normalized_cdf,
 )
 from modules.plots import plot_main_figure
+from modules.anchored_cone import build_anchored_time_price_density
 from modules import rnd_bridge
 from modules import rnd_forward as rnd_forward_mod
 
@@ -157,6 +158,42 @@ def _cached_spot(provider: str, ticker: str) -> dict:
     fuente, que llega diferida quince minutos.
     """
     return get_options_provider(provider).get_quotes([ticker])
+
+
+# Anclas del cono (modules.anchored_cone): a lo mas este numero de vencimientos intermedios.
+MAX_ANCLAS = 20
+# Filtro de calidad de anclas intermedias: masa de la densidad fuera de los strikes cotizados. Arriba de este
+# umbral la forma de las colas sale del modelo, no del mercado, y mete ruido de forma al cono (medido el 17 nov
+# 2026 en SPY: el 11 dic con 0.34% fuera tenia razon 95/68 de 3.02 contra 2.15 del trimestral del 18 dic, y la
+# banda de 68% saltaba 38% en una semana). El vencimiento elegido se conserva siempre.
+MAX_MASA_EXTRAPOLADA = 0.0025
+
+
+def cached_anchor_density(ticker: str, expiry: str, spot_key: float, r: float, q: float,
+                          mode: str, T_key: float, valuation: str):
+    return _cached_anchor_density(active_provider_name(), ticker, expiry, spot_key, r, q, mode, T_key, valuation)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_anchor_density(provider: str, ticker: str, expiry: str, spot_key: float, r: float, q: float,
+                           mode: str, T_key: float, valuation: str):
+    """
+    Densidad de un vencimiento intermedio para anclar el cono. Usa la misma cadena
+    cacheada que los muros de GEX (_cached_options), asi que no duplica peticiones al
+    proveedor; T_key es el plazo de calendario redondeado a 1e-4 anios (~50 minutos).
+    """
+    df = _cached_options(provider, ticker, expiry)
+    if df is None or df.empty:
+        return None
+    K, pdf, diag = rnd_bridge.density(df, spot=spot_key, valuation_date=pd.Timestamp(valuation),
+                                      expiry_date=pd.Timestamp(expiry), r_annual=r, q_annual=q,
+                                      mode=mode, T=T_key)
+    fuera = float((diag or {}).get("mass_below_obs", 0.0) or 0.0) + float((diag or {}).get("mass_above_obs", 0.0) or 0.0)
+    ok = True
+    if (diag or {}).get("mode") == "corrected":
+        from modules.rnd_corrected import calidad as _calidad
+        ok = _calidad(df, diag)["ok"]
+    return np.asarray(K, float), np.asarray(pdf, float), fuera, ok
 
 
 def cached_expiries(ticker: str):
@@ -848,6 +885,15 @@ def render_densidades(ticker: str):
         # Dividend yield (q) eliminado del UI — se asume 0 por simplicidad.
         q_rate = 0.0
 
+        st.checkbox(
+            "Cono anclado en cada vencimiento", value=True, key="cone_anclado",
+            help=("Encendido (default desde el 17 nov 2026): el cono pasa por la densidad de cada "
+                  "vencimiento listado hasta el elegido e interpola las funciones cuantil con "
+                  "varianza total lineal en el tiempo. Apagado: la construccion anterior, una mezcla "
+                  "de la densidad del vencimiento con una campana en el precio de hoy, que subestima "
+                  "el riesgo de los primeros dias."),
+        )
+
     # El interruptor del heatmap se dibuja arriba de la grafica, junto al
     # selector de motor. Aqui solo se lee el valor vigente, porque la lamina se
     # construye antes de llegar a esa fila en el flujo del script.
@@ -961,11 +1007,58 @@ def render_densidades(ticker: str):
                     "corta recorta las colas y el cono sale estrecho.")
         st.stop()
 
+    # Compuerta de calidad (2026-11-17): la densidad se marca, no se esconde.
+    if rnd_diag.get("mode") == "corrected":
+        from modules.rnd_corrected import calidad as _calidad
+        _q = _calidad(options_df, rnd_diag)
+        if not _q["ok"]:
+            _txt = []
+            if "martingala" in _q["motivos"]:
+                _txt.append(f"la media se aleja {rnd_diag.get('mean_vs_forward_bp', float('nan')):+.0f} pb del forward")
+            if "sonrisa" in _q["motivos"] and _q["brecha_atm"] is not None:
+                _txt.append(f"la sonrisa ajustada da IV ATM de {rnd_diag['atm_iv']:.1%} contra "
+                            f"{_q['atm_iv_observada']:.1%} cotizada")
+            st.error(f"Densidad no confiable para **{expiry_str}**: {' y '.join(_txt)}. Las cotizaciones de este "
+                     f"vencimiento no sostienen la sonrisa; elige otro vencimiento antes de leer probabilidades.")
+
     rnd_by_date = {pd.Timestamp(expiry_date): (K_grid, pdf_K)}
 
-    dates_all, price_grid, density = build_time_price_density(
-        quotes_df, rnd_by_date, hist_sigma_rel=hist_sigma_rel, interpolate_future=True,
-    )
+    # Cono anclado (decision de Leo, 17 nov 2026): densidad propia de cada vencimiento intermedio.
+    # rnd_by_date se queda solo con el elegido porque de ahi salen las lineas de vencimiento.
+    cone_info = None
+    if st.session_state.get("cone_anclado", True):
+        _anclas, _filtradas = {}, []
+        _ahora_c = pd.Timestamp.now(tz="America/New_York")
+        _inter = [e for e in (available_expiries or [])
+                  if pd.Timestamp(valuation_date) < pd.Timestamp(e) < pd.Timestamp(expiry_date)][:MAX_ANCLAS]
+        if _inter:
+            with st.spinner(f"Densidades de {len(_inter)} vencimientos para anclar el cono..."):
+                for _e in _inter:
+                    try:
+                        _Te = _tc_d.calendar_T(_ahora_c, pd.Timestamp(_e))
+                        _r = cached_anchor_density(ticker, str(_e), round(float(spot), 2), float(r_rate),
+                                                   float(q_rate), rnd_mode, round(float(_Te), 4),
+                                                   str(pd.Timestamp(valuation_date).date()))
+                    except Exception:
+                        continue
+                    if _r is None:
+                        continue
+                    if not _r[3]:
+                        _filtradas.append((str(_e), "calidad"))
+                        continue
+                    if _r[2] > MAX_MASA_EXTRAPOLADA:
+                        _filtradas.append((str(_e), _r[2]))
+                        continue
+                    _anclas[pd.Timestamp(_e)] = (_r[0], _r[1])
+        _anclas.update(rnd_by_date)
+        dates_all, price_grid, density, cone_info = build_anchored_time_price_density(
+            quotes_df, _anclas, spot=spot, hist_sigma_rel=hist_sigma_rel, return_info=True,
+        )
+        cone_info["filtradas"] = _filtradas
+    else:
+        dates_all, price_grid, density = build_time_price_density(
+            quotes_df, rnd_by_date, hist_sigma_rel=hist_sigma_rel, interpolate_future=True,
+        )
 
     min_date = valuation_date - pd.Timedelta(days=int(past_days))
     max_date = valuation_date + pd.Timedelta(days=int(future_days))
@@ -1356,6 +1449,20 @@ def render_densidades(ticker: str):
     # contra la superficie. Este panel es el que permite decidir si la densidad
     # que se esta viendo es publicable o no.
     with st.expander(f"RND diagnostics — engine: {rnd_mode}", expanded=False):
+        if cone_info is not None:
+            _an = ", ".join(a["expiry"] for a in cone_info["anclas"])
+            _ds = cone_info["descartadas"]
+            st.caption(
+                f"Cono anclado en {len(cone_info['anclas'])} vencimientos ({_an}). "
+                + (f"Descartados por varianza total no creciente: {', '.join(x['expiry'] for x in _ds)}. " if _ds else "")
+                + (f"Sin anclar por colas extrapoladas (mas de {MAX_MASA_EXTRAPOLADA:.2%} de la masa fuera de los strikes) "
+                   f"o por no pasar la compuerta de calidad: "
+                   f"{', '.join(f'{e} ({m:.2%})' if isinstance(m, float) else f'{e} (calidad)' for e, m in cone_info.get('filtradas', []))}. "
+                   if cone_info.get("filtradas") else "")
+                + "Entre anclas, varianza total lineal en el tiempo y funciones cuantil interpoladas."
+            )
+        else:
+            st.caption("Cono de mezcla (construccion anterior): subestima el riesgo de los primeros dias.")
         if rnd_diag.get("mode") == "legacy":
             st.caption(rnd_diag.get("nota", ""))
             st.caption(

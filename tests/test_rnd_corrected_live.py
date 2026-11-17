@@ -117,3 +117,35 @@ def test_malla_adaptativa_cumple_la_martingala_con_sesgo_de_puts():
     assert abs(nuevo["mean_vs_forward_bp"]) < 2.0
     assert nuevo["tail_outside_left"] < 1e-4 and nuevo["tail_outside_right"] < 1e-4
     assert nuevo["grid_extensions"] >= 1
+
+
+def test_alas_sin_bid_no_entran_a_la_sonrisa():
+    # Regla del VIX de Cboe: solo bid > 0 desde el dinero y corte en dos strikes seguidos sin bid.
+    import pandas as pd
+    from modules.rnd_corrected import _otm_smile
+    filas = []
+    for k, bid, iv in [(50, 0.0, 1.15), (60, 0.0, 1.10), (70, 0.01, 1.05), (80, 0.0, 1.0), (90, 0.0, 0.98),
+                       (95, 0.05, 0.6), (98, 0.8, 0.25), (100, 2.0, 0.2)]:
+        filas.append({"strike": k, "option_type": "P", "bid": bid, "ask": bid + 0.02, "iv": iv})
+    for k, bid, iv in [(100, 2.0, 0.2), (102, 0.9, 0.18), (105, 0.0, 0.5), (110, 0.02, 0.7), (115, 0.0, 0.9), (120, 0.0, 1.0)]:
+        filas.append({"strike": k, "option_type": "C", "bid": bid, "ask": bid + 0.02, "iv": iv})
+    K, iv = _otm_smile(pd.DataFrame(filas), forward=100.0)
+    # Puts: 98 y 95 entran; 90 y 80 sin bid seguidos cortan el ala, así que 70 (un tick) no entra.
+    # Calls: 100 y 102 entran; 105 sin bid se salta, 110 con bid entra; 115 y 120 cortan.
+    assert list(K) == [95, 98, 100, 102, 110]
+    sin_bid = pd.DataFrame([{"strike": k, "option_type": "P", "iv": 0.2} for k in (90, 95)] +
+                           [{"strike": k, "option_type": "C", "iv": 0.2} for k in (100, 105)])
+    K2, _ = _otm_smile(sin_bid, forward=100.0)          # sin columna bid (backtest): sin filtro
+    assert list(K2) == [90, 95, 100, 105]
+
+
+def test_compuerta_de_calidad_marca_martingala_y_sonrisa():
+    import pandas as pd
+    from modules.rnd_corrected import calidad
+    ch = pd.DataFrame([{"strike": 99.0, "option_type": "P", "iv": 0.20}, {"strike": 100.0, "option_type": "C", "iv": 0.24},
+                       {"strike": 100.0, "option_type": "P", "iv": 0.24}, {"strike": 101.0, "option_type": "C", "iv": 0.23}])
+    sano = calidad(ch, {"mean_vs_forward_bp": 0.4, "forward": 100.2, "atm_iv": 0.245})
+    assert sano["ok"] and sano["atm_iv_observada"] == pytest.approx(0.24)
+    roto = calidad(ch, {"mean_vs_forward_bp": 207.6, "forward": 100.2, "atm_iv": 0.42})
+    assert not roto["ok"] and roto["motivos"] == ["martingala", "sonrisa"]
+    assert roto["brecha_atm"] == pytest.approx(0.18)
