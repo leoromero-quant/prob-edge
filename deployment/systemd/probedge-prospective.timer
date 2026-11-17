@@ -1,0 +1,14 @@
+[Unit]
+Description=Captura prospectiva a las 10:00 y 15:45 de Nueva York, días hábiles
+
+[Timer]
+# Zona horaria explícita: systemd sigue el horario de verano de Nueva York solo. Los feriados y cierres
+# tempranos los decide el script con el reloj del mercado de Tradier.
+OnCalendar=Mon..Fri 10:00 America/New_York
+OnCalendar=Mon..Fri 15:45 America/New_York
+AccuracySec=30s
+# Sin recuperación al encender: una captura tarde se etiquetaría con otra franja y no sirve para el reporte.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

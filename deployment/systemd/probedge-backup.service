@@ -1,0 +1,7 @@
+[Unit]
+Description=Prob-Edge, respaldo semanal de la captura cruda
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/Risk-Neutral-Density-Probabilities
+ExecStart=%h/projects/Risk-Neutral-Density-Probabilities/scripts/backup_raw.sh

@@ -1,0 +1,9 @@
+[Unit]
+Description=Respaldo de la captura cruda, sábados 09:00
+
+[Timer]
+OnCalendar=Sat 09:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
