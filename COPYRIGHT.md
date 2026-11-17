@@ -4,7 +4,7 @@
 **Repository:** `github.com/leoromero-quant/prob-edge`
 **Author and sole copyright holder:** Leonardo Suárez Romero, PhD
 **Email:** leonardo@leoromero.dev
-**Public profile:** [leoromero.dev](https://leoromero.dev) · [LinkedIn](https://linkedin.com/in/leonardo-suarez-romero)
+**Public profile:** [leoromero.dev](https://leoromero.dev) · [LinkedIn](https://linkedin.com/in/leonardo-romero-phd)
 **Effective date of this declaration:** 22 May 2026
 **Repository state at declaration:** commit `8dbc85a` on branch `main`
 **First-commit timestamp of the codebase:** 3 December 2025, 15:59 −06:00 (commit `c6c18f6`)

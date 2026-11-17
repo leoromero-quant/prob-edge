@@ -4,7 +4,7 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 .pytest_cache/
-rnd.db
+rnd.db*
 tastytrade/
 
 # Snapshots crudos de cadenas: nunca en git
@@ -16,3 +16,9 @@ data/fmp_cache/
 data/series/
 reports/preview/
 data/intraday/
+
+# Credenciales OAuth descargadas de Google, nunca al repo
+client_secret*.json
+
+# Experimentos locales (cachés de pruebas, paquetes de ATAS): no se versionan
+sandbox/
