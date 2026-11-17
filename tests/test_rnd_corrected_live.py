@@ -82,13 +82,38 @@ def test_pocos_strikes_falla_con_mensaje_claro():
 
 @pytest.mark.parametrize("trio", ["SPY_2024-12-18_2025-01-17", "QQQ_2025-03-14_2025-03-21", "AAPL_2025-04-16_2025-05-16"])
 def test_backtest_sin_cambios_contra_los_cuantiles_del_reporte(trio):
-    """Los cuantiles de corrected sobre las cadenas congeladas son los del reporte de 12 meses."""
+    """Con adaptive_tails=False, los cuantiles sobre las cadenas congeladas son los del reporte de 12 meses."""
     from modules.utils import cdf_quantiles
     t, cd, ex = trio.split("_")
     s = pd.read_parquet(ROOT / "docs/backtest_12mo/backtest_scores.parquet")
     fila = s[(s.ticker == t) & (s.construction_date.astype(str).str[:10] == cd) & (s.method == "corrected")].iloc[0]
     ch = pd.read_parquet(ROOT / f"docs/backtest_12mo/chains/{trio}.parquet")
     K, p = corrected_rnd(ch, spot=fila.spot, valuation_date=pd.Timestamp(cd), expiry_date=pd.Timestamp(ex),
-                         r_annual=0.045, q_annual=0.0)
+                         r_annual=0.045, q_annual=0.0, adaptive_tails=False)
     q = cdf_quantiles(K, p, (0.16, 0.5, 0.84))
     assert np.allclose(q, [fila.q16, fila.q50, fila.q84], rtol=0, atol=1e-6)
+
+
+def _cadena_sesgo_puts():
+    """Sonrisa SVI con sesgo de puts tipo SPY (spot 740, 45 días), strikes de -8 a +4 sigmas ATM."""
+    S, r, T = 740.06, 0.04, 44.72 / 365.25
+    F = S * math.exp(r * T)
+
+    def iv(K):
+        k = math.log(K / F)
+        a, b, rho, m, s = 0.0035, 0.06, -0.75, 0.02, 0.08
+        return math.sqrt((a + b * (rho * (k - m) + math.sqrt((k - m) ** 2 + s ** 2))) / T)
+    sig = iv(F)
+    Ks = np.arange(round(F * math.exp(-8.2 * sig * math.sqrt(T))), round(F * math.exp(4.0 * sig * math.sqrt(T))), 1.0)
+    return pd.DataFrame([{"strike": float(K), "option_type": t, "iv": iv(K)} for K in Ks for t in ("C", "P")]), S, r, T
+
+
+def test_malla_adaptativa_cumple_la_martingala_con_sesgo_de_puts():
+    """Sin extender la malla, la cola izquierda queda fuera y la media sube ~20 pb (en vivo, SPY: +18.8 pb)."""
+    ch, S, r, T = _cadena_sesgo_puts()
+    _, _, viejo = corrected_density(ch, S, VAL, EXP, r_annual=r, T=T, adaptive_tails=False)
+    _, _, nuevo = corrected_density(ch, S, VAL, EXP, r_annual=r, T=T)
+    assert viejo["mean_vs_forward_bp"] > 10 and viejo["raw_integral"] < 0.998
+    assert abs(nuevo["mean_vs_forward_bp"]) < 2.0
+    assert nuevo["tail_outside_left"] < 1e-4 and nuevo["tail_outside_right"] < 1e-4
+    assert nuevo["grid_extensions"] >= 1

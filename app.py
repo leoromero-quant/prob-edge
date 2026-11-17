@@ -1387,7 +1387,10 @@ def render_densidades(ticker: str):
             st.caption(
                 f"Cobertura de strikes observada: {d['sigma_obs_low']:.1f} a "
                 f"{d['sigma_obs_high']:+.1f} sigmas. Plazo T = {d['T'] * 365.25:.2f} dias de "
-                f"calendario hasta la liquidacion."
+                f"calendario hasta la liquidacion. Malla extendida {d.get('grid_extensions', 0)} "
+                f"{'vez' if d.get('grid_extensions', 0) == 1 else 'veces'} para cubrir las colas; "
+                f"probabilidad que queda fuera: {d.get('tail_outside_left', 0) * 100:.3f}% abajo y "
+                f"{d.get('tail_outside_right', 0) * 100:.3f}% arriba."
             )
             st.caption(rnd_diag.get("nota", ""))
         else:
