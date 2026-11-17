@@ -535,6 +535,47 @@ p_{\text{hist}}(s \mid t)
     st.markdown(r"and from these we obtain the 68% and 95% confidence bands that define the probability cone shown in the chart.")
 
 
+def _metodologia_corrected():
+    """
+    Desarrollo del motor corrected (default desde el 2026-11-17): extraccion neutral al
+    riesgo mas limpia que el Breeden-Litzenberger directo sobre precios. Es el metodo
+    del backtest de 12 meses (Phase G, decision de medida (a)).
+    """
+    st.markdown(r"""
+El forward se fija con la tasa y el rendimiento por dividendo, $F = S\,e^{(r-q)T}$
+(en la app $q = 0$). Se toman las volatilidades implicitas fuera del dinero, puts
+debajo de $F$ y calls arriba, que son el ala mas liquida de cada lado, y se ajusta la
+varianza total $w(k) = \sigma^{2}(k)\,T$ en log-moneyness $k = \ln(K/F)$ con SVI crudo:
+""")
+    st.latex(r"""
+w(k) = a + b\left[\rho\,(k - m) + \sqrt{(k - m)^{2} + \sigma^{2}}\right].
+""")
+    st.markdown(r"""
+SVI tiene alas lineales en varianza, la forma que permite la cota de momentos de Lee,
+asi que la extrapolacion fuera de los strikes cotizados no inventa colas planas ni
+explosivas. Si SVI no se puede ajustar (menos de cinco strikes o falla del solver), se
+usa una sonrisa cuadratica con alas planas.
+
+Con la sonrisa se reconstruyen precios de call Black-Scholes sobre una malla de unas
+cinco desviaciones, y la densidad sale de Breeden-Litzenberger sobre esos precios:
+""")
+    st.latex(r"""
+f_Q(K) = e^{rT}\,\frac{\partial^{2} C(K)}{\partial K^{2}}.
+""")
+    st.markdown(r"""
+Derivar precios generados por una sonrisa suave, y no precios cotizados, elimina el
+ruido que la segunda derivada amplifica en el metodo directo. Como los precios salen de
+Black-Scholes al forward $F$, la martingala $\mathbb{E}_Q[S_T] = F$ se cumple por
+construccion.
+
+**Validacion.** Backtest fuera de muestra de 12 vencimientos mensuales de 2025, SPY, QQQ
+y AAPL a 30 y 7 dias (72 trios): CRPS 10.14 contra 10.83 del expected move del broker, y
+mejor en los tres regimenes de volatilidad. Residual declarado: en volatilidad alta la
+cola al 95% queda corta (Winkler95 107.1 contra 93.4 del broker). La densidad es neutral
+al riesgo: describe lo que descuentan las opciones, no la probabilidad fisica.
+""")
+
+
 def _metodologia_forward():
     """
     Desarrollo del motor forward: sonrisa SVI libre de arbitraje bajo medida
@@ -776,18 +817,20 @@ def render_densidades(ticker: str):
 
         # ── Interruptor de motor de densidad ───────────────────────────────
         # Default desde el entorno (PROBEDGE_RND), sobreescribible en vivo para
-        # poder comparar los dos conos sin reiniciar. `forward` es el default
-        # desde el 22 de octubre de 2026: legacy corta las colas con cadena
-        # corta y se desboca con alas iliquidas en cadena larga (QQQ 12-18 dio
-        # una mediana 5% bajo el spot, contra la martingala).
+        # poder comparar los conos sin reiniciar. `corrected` es el default desde
+        # el 17 de noviembre de 2026 (decision de Leo): es el metodo validado fuera
+        # de muestra en el backtest de 12 meses. `forward` (default desde el 22 de
+        # octubre) queda en validacion prospectiva: no se pudo medir en el
+        # backtest porque las cadenas historicas no traen bid/ask. `legacy` corta
+        # las colas con cadena corta y fue el peor metodo del backtest.
         # El selector de motor se dibuja arriba de la grafica, junto al
         # interruptor del heatmap, porque son los dos controles que cambian lo
         # que se ve. Aqui solo se fija el default y se lee el valor vigente:
         # Streamlit vuelve a correr el script completo al cambiarlo, asi que el
         # valor esta disponible antes de calcular la densidad.
-        _default_mode = os.getenv("PROBEDGE_RND", "forward").strip().lower()
+        _default_mode = os.getenv("PROBEDGE_RND", rnd_bridge.DEFAULT_MODE).strip().lower()
         if _default_mode not in rnd_bridge.MODES:
-            _default_mode = "forward"
+            _default_mode = rnd_bridge.DEFAULT_MODE
         if "dens_engine" not in st.session_state:
             st.session_state["dens_engine"] = _default_mode
         rnd_mode = st.session_state["dens_engine"]
@@ -911,10 +954,11 @@ def render_densidades(ticker: str):
         )
     except Exception as e:
         st.error(f"Could not build RND ({rnd_mode}): {e}")
-        if rnd_mode == "forward":
+        if rnd_mode in ("forward", "corrected"):
             st.info("Elige un vencimiento mensual (◆) o trimestral (★): suelen "
-                    "listar strikes en las colas. `legacy` no es salida aqui, con "
-                    "cadena corta recorta las colas y el cono sale estrecho.")
+                    "listar strikes en las colas. `corrected` necesita al menos tres "
+                    "strikes OTM con IV. `legacy` no es salida aqui, con cadena "
+                    "corta recorta las colas y el cono sale estrecho.")
         st.stop()
 
     rnd_by_date = {pd.Timestamp(expiry_date): (K_grid, pdf_K)}
@@ -1284,10 +1328,17 @@ def render_densidades(ticker: str):
                     "RND engine",
                     options=list(rnd_bridge.MODES),
                     key="dens_engine",
-                    help=("legacy: segunda derivada sobre calls limpios por "
-                          "paridad, el camino historico de la app. forward: "
-                          "medida forward, forward por cruce call-put, sonrisa "
-                          "ajustada y extension de cola acotada por Lee."),
+                    format_func=lambda m: {"corrected": "corrected (validated)",
+                                           "forward": "forward (in validation)",
+                                           "legacy": "legacy"}.get(m, m),
+                    help=("corrected: sonrisa SVI sin arbitraje sobre IV OTM, "
+                          "precios Black-Scholes al forward teorico y "
+                          "Breeden-Litzenberger; validado fuera de muestra (CRPS "
+                          "10.14 contra 10.83 del expected move del broker, 72 "
+                          "trios de 2025). forward: medida forward, forward por "
+                          "cruce call-put y extension de cola acotada por Lee; en "
+                          "validacion con cadenas de Tradier. legacy: segunda "
+                          "derivada sobre calls limpios, el peor del backtest."),
                     horizontal=True,
                 )
 
@@ -1308,9 +1359,37 @@ def render_densidades(ticker: str):
         if rnd_diag.get("mode") == "legacy":
             st.caption(rnd_diag.get("nota", ""))
             st.caption(
-                "Cambia el motor a `forward` arriba de la grafica para ver el cono "
-                "con la densidad corregida y sus diagnosticos."
+                "Cambia el motor a `corrected` arriba de la grafica para ver el cono "
+                "validado y sus diagnosticos."
             )
+        elif rnd_diag.get("mode") == "corrected":
+            d = rnd_diag
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Forward (teorico)", f"{d['forward']:.2f}",
+                      f"{(d['forward'] / spot - 1) * 1e4:+.0f} pb vs spot",
+                      help="S·e^((r-q)T) con q = 0. En emisoras con dividendo queda alto.")
+            c2.metric("Media vs forward", f"{d['mean_vs_forward_bp']:+.2f} pb",
+                      help="Martingala contra el forward teorico. Por construccion debe "
+                           "quedar cerca de cero; si no, la malla esta truncando masa.")
+            c3.metric("Integral (antes de normalizar)", f"{d['raw_integral']:.4f}")
+            c4.metric("Sonrisa", "SVI" if d["smile_model"] == "svi" else "cuadratica",
+                      f"{d['smile_points']} puntos",
+                      help="Si SVI no ajusta (menos de 5 strikes o falla del solver) se usa "
+                           "la sonrisa cuadratica con alas planas, la variante corrected_quad "
+                           "del backtest.")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("IV ATM (sonrisa)", f"{d['atm_iv'] * 100:.2f}%")
+            c2.metric("Desv / lognormal", f"{d['sd_ratio_lognormal']:.3f}",
+                      help="Con sesgo y colas gruesas debe estar por encima de 1.")
+            c3.metric("Masa bajo el strike minimo", f"{d['mass_below_obs'] * 100:.2f}%",
+                      help="Masa que proviene del ala extrapolada, no de cotizaciones.")
+            c4.metric("Masa sobre el strike maximo", f"{d['mass_above_obs'] * 100:.2f}%")
+            st.caption(
+                f"Cobertura de strikes observada: {d['sigma_obs_low']:.1f} a "
+                f"{d['sigma_obs_high']:+.1f} sigmas. Plazo T = {d['T'] * 365.25:.2f} dias de "
+                f"calendario hasta la liquidacion."
+            )
+            st.caption(rnd_diag.get("nota", ""))
         else:
             d = rnd_diag
             c1, c2, c3, c4 = st.columns(4)
@@ -1435,7 +1514,14 @@ def render_densidades(ticker: str):
     # texto describe el metodo que efectivamente produjo la lamina que se acaba
     # de ver, no un metodo generico. Cambiar el motor cambia esta seccion.
     st.subheader("Explanation")
-    if rnd_mode == "forward":
+    if rnd_mode == "corrected":
+        st.info(
+            "Motor activo: **corrected**. La densidad se obtiene de una sonrisa SVI "
+            "sin arbitraje ajustada a las IV fuera del dinero, con precios "
+            "Black-Scholes al forward teorico y Breeden-Litzenberger. Es el metodo "
+            "validado fuera de muestra. El desarrollo de abajo corresponde a este motor."
+        )
+    elif rnd_mode == "forward":
         st.info(
             "Motor activo: **forward**. La densidad se obtiene de una sonrisa "
             "SVI libre de arbitraje bajo medida forward, en forma cerrada. El "
@@ -1477,7 +1563,9 @@ and understand how the market is pricing future uncertainty.
     # buried in formulas, but one click reveals the full Breeden–Litzenberger
     # derivation for the quantitatively inclined.
     with st.expander("Mathematical summary of the methodology", expanded=False):
-        if rnd_mode == "forward":
+        if rnd_mode == "corrected":
+            _metodologia_corrected()
+        elif rnd_mode == "forward":
             _metodologia_forward()
         else:
             _metodologia_legacy()

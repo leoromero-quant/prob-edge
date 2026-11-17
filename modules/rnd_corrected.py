@@ -88,9 +88,13 @@ def _otm_smile(chain: pd.DataFrame, forward: float):
     """
     c = chain.dropna(subset=["iv"])
     c = c[c["iv"] > 0]
+    # Primera letra en minuscula: el backtest trae "call"/"put" y las cadenas en vivo
+    # (Tradier, tastytrade) "C"/"P". Comparar contra "put" dejaba la cadena en vivo sin
+    # un solo OTM y caia en silencio al promedio de todas las IV.
+    t = c["option_type"].astype(str).str.strip().str.lower().str[0]
     otm = pd.concat([
-        c[(c["option_type"] == "put") & (c["strike"] < forward)],
-        c[(c["option_type"] == "call") & (c["strike"] >= forward)],
+        c[(t == "p") & (c["strike"] < forward)],
+        c[(t == "c") & (c["strike"] >= forward)],
     ])
     if otm.empty:  # fall back to whatever iv exists
         otm = c
@@ -98,18 +102,24 @@ def _otm_smile(chain: pd.DataFrame, forward: float):
     return g["strike"].to_numpy(dtype=float), g["iv"].to_numpy(dtype=float)
 
 
-def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
-                  q_annual=0.0, n_grid: int = 400, sigma_span: float = 5.0,
-                  smile: str = "svi", **_ignore):
+def corrected_density(chain, spot, valuation_date, expiry_date, r_annual=0.045,
+                      q_annual=0.0, n_grid: int = 400, sigma_span: float = 5.0,
+                      smile: str = "svi", T: float | None = None, **_ignore):
     """
-    (chain, spot, valuation_date, expiry_date, r, q) -> (K_grid, pdf), same
-    producer contract as `bl`. Risk-neutral extraction via a fitted IV smile.
+    Motor `corrected` con diagnosticos: (K_grid, pdf, info). Es la misma matematica que
+    `corrected_rnd` (el producto validado en el backtest de 12 meses); solo agrega:
 
-    smile="svi" (default): raw-SVI total-variance fit with LINEAR (no-arb) wings,
-    fixing the flat-wing extrapolation that left a 95%-tail gap. Falls back to a
-    quadratic smile with flat wings if SVI can't be fit (<5 strikes / solver fail).
+      - `T` explicito: plazo de calendario hasta la liquidacion, el reloj con el que
+        cotiza la IV el proveedor (time_clock.calendar_T). Sin `T` se usan dias
+        enteros / 365.25, exactamente como en el backtest.
+      - `info` para auditar la densidad en vivo: forward teorico, IV ATM de la sonrisa,
+        si SVI ajusto o se cayo a la cuadratica, puntos de sonrisa, cobertura en
+        sigmas, masa fuera de los strikes observados, martingala y dispersion contra
+        la lognormal de la misma IV ATM.
     """
-    T = max((pd.Timestamp(expiry_date) - pd.Timestamp(valuation_date)).days / _YEAR, 1e-6)
+    if T is None:
+        T = max((pd.Timestamp(expiry_date) - pd.Timestamp(valuation_date)).days / _YEAR, 1e-6)
+    T = float(max(T, 1e-6))
     F = spot * math.exp((r_annual - q_annual) * T)
 
     K_obs, iv_obs = _otm_smile(chain, F)
@@ -152,7 +162,44 @@ def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
     area = np.trapezoid(pdf, K_grid)
     if not np.isfinite(area) or area <= 0:
         raise ValueError("corrected_rnd produced a degenerate density.")
-    return K_grid, pdf / area
+    pdf = pdf / area
+
+    mean = float(np.trapezoid(K_grid * pdf, K_grid))
+    sd = float(math.sqrt(max(np.trapezoid((K_grid - mean) ** 2 * pdf, K_grid), 0.0)))
+    sd_logn = F * math.sqrt(max(math.exp(sig_atm ** 2 * T) - 1.0, 0.0))
+    s_unit = sig_atm * math.sqrt(T)
+    info = {
+        "T": T, "forward": F, "atm_iv": sig_atm,
+        "smile_model": "svi" if svi is not None else "quad",
+        "smile_points": int(K_obs.size),
+        "raw_integral": float(area),
+        "mean_vs_forward_bp": (mean / F - 1.0) * 1e4,
+        "sd_ratio_lognormal": sd / sd_logn if sd_logn > 0 else float("nan"),
+        "sigma_obs_low": x_lo / s_unit, "sigma_obs_high": x_hi / s_unit,
+        "mass_below_obs": float(np.trapezoid(np.where(K_grid < K_obs.min(), pdf, 0.0), K_grid)),
+        "mass_above_obs": float(np.trapezoid(np.where(K_grid > K_obs.max(), pdf, 0.0), K_grid)),
+    }
+    return K_grid, pdf, info
+
+
+def corrected_rnd(chain, spot, valuation_date, expiry_date, r_annual=0.045,
+                  q_annual=0.0, n_grid: int = 400, sigma_span: float = 5.0,
+                  smile: str = "svi", **_ignore):
+    """
+    (chain, spot, valuation_date, expiry_date, r, q) -> (K_grid, pdf), same
+    producer contract as `bl`. Risk-neutral extraction via a fitted IV smile.
+
+    smile="svi" (default): raw-SVI total-variance fit with LINEAR (no-arb) wings,
+    fixing the flat-wing extrapolation that left a 95%-tail gap. Falls back to a
+    quadratic smile with flat wings if SVI can't be fit (<5 strikes / solver fail).
+
+    Delegates to `corrected_density` with whole-day T, so the scored backtest path
+    is unchanged (verified on the 72 frozen chains, 2026-11-17).
+    """
+    K_grid, pdf, _ = corrected_density(chain, spot, valuation_date, expiry_date,
+                                       r_annual=r_annual, q_annual=q_annual, n_grid=n_grid,
+                                       sigma_span=sigma_span, smile=smile)
+    return K_grid, pdf
 
 
 def corrected_rnd_quad(*args, **kwargs):

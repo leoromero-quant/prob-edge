@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Puente entre la cadena que arma app.py y los dos motores de densidad.
+Puente entre la cadena que arma app.py y los motores de densidad.
 
 Existe para que la aplicacion pueda alternar en caliente entre:
+
+  corrected  `rnd_corrected.corrected_density`: sonrisa SVI con alas lineales (sin
+             arbitraje) sobre las IV OTM, precios Black-Scholes al forward teorico y
+             Breeden-Litzenberger. Es el metodo validado fuera de muestra (backtest de
+             12 meses, 72 trios: CRPS 10.14 contra 10.83 del expected move del broker).
+             Default desde el 2026-11-17 (decision de Leo).
 
   legacy   `compute_rnd_from_clean_calls` sobre calls limpios por paridad, que es
            lo que la app ha corrido siempre. Interpola precios de CALL en todo el
@@ -19,19 +25,21 @@ doble de ancha de lo que implica la superficie. La forward salio 28.22, un 14%
 por encima de la lognormal, que es lo que corresponde a una densidad con sesgo y
 colas gruesas.
 
-Se conserva `legacy` como opcion, y por defecto, para que la comparacion se pueda
-hacer en vivo y para no cambiar el comportamiento de lo desplegado sin decision
-explicita.
+Se conservan `forward` (en validacion prospectiva con cadenas de Tradier; no se pudo
+medir en el backtest porque las cadenas historicas no traen bid/ask) y `legacy` (el
+peor metodo del backtest, solo para diagnostico), para comparar en vivo.
 """
 from __future__ import annotations
 import numpy as np, pandas as pd
 
+from . import rnd_corrected as _cor
 from . import rnd_forward as _fwd
 from . import vol_metrics as _vm
 from . import smile_metrics as _sm
 from .utils import build_clean_calls_from_chain, compute_rnd_from_clean_calls, compute_rnd_from_calls
 
-MODES = ("legacy", "forward")
+MODES = ("corrected", "forward", "legacy")
+DEFAULT_MODE = "corrected"
 
 
 def to_rnd_frame(options_df: pd.DataFrame) -> pd.DataFrame:
@@ -69,6 +77,16 @@ def density(options_df, spot: float, valuation_date, expiry_date,
     if T is None:
         T = max((exp - val).days / 365.25, 1e-6)
     T = float(max(T, 1e-6))
+
+    if mode == "corrected":
+        K, p, info = _cor.corrected_density(options_df, spot, val, exp, r_annual=r_annual,
+                                            q_annual=q_annual, T=T)
+        return np.asarray(K, float), np.asarray(p, float), {
+            "mode": "corrected", **info,
+            "nota": "Forward teorico S·e^((r-q)T) con q = 0: en emisoras con dividendo el "
+                    "forward queda alto por el rendimiento del dividendo. La martingala se "
+                    "cumple contra ese forward por construccion (precios Black-Scholes).",
+        }
 
     if mode == "legacy":
         clean = build_clean_calls_from_chain(options_df, S0=spot, valuation_date=val,
