@@ -189,7 +189,11 @@ def _cached_anchor_density(provider: str, ticker: str, expiry: str, spot_key: fl
                                       expiry_date=pd.Timestamp(expiry), r_annual=r, q_annual=q,
                                       mode=mode, T=T_key)
     fuera = float((diag or {}).get("mass_below_obs", 0.0) or 0.0) + float((diag or {}).get("mass_above_obs", 0.0) or 0.0)
-    return np.asarray(K, float), np.asarray(pdf, float), fuera
+    ok = True
+    if (diag or {}).get("mode") == "corrected":
+        from modules.rnd_corrected import calidad as _calidad
+        ok = _calidad(df, diag)["ok"]
+    return np.asarray(K, float), np.asarray(pdf, float), fuera, ok
 
 
 def cached_expiries(ticker: str):
@@ -1003,6 +1007,20 @@ def render_densidades(ticker: str):
                     "corta recorta las colas y el cono sale estrecho.")
         st.stop()
 
+    # Compuerta de calidad (2026-11-17): la densidad se marca, no se esconde.
+    if rnd_diag.get("mode") == "corrected":
+        from modules.rnd_corrected import calidad as _calidad
+        _q = _calidad(options_df, rnd_diag)
+        if not _q["ok"]:
+            _txt = []
+            if "martingala" in _q["motivos"]:
+                _txt.append(f"la media se aleja {rnd_diag.get('mean_vs_forward_bp', float('nan')):+.0f} pb del forward")
+            if "sonrisa" in _q["motivos"] and _q["brecha_atm"] is not None:
+                _txt.append(f"la sonrisa ajustada da IV ATM de {rnd_diag['atm_iv']:.1%} contra "
+                            f"{_q['atm_iv_observada']:.1%} cotizada")
+            st.error(f"Densidad no confiable para **{expiry_str}**: {' y '.join(_txt)}. Las cotizaciones de este "
+                     f"vencimiento no sostienen la sonrisa; elige otro vencimiento antes de leer probabilidades.")
+
     rnd_by_date = {pd.Timestamp(expiry_date): (K_grid, pdf_K)}
 
     # Cono anclado (decision de Leo, 17 nov 2026): densidad propia de cada vencimiento intermedio.
@@ -1024,6 +1042,9 @@ def render_densidades(ticker: str):
                     except Exception:
                         continue
                     if _r is None:
+                        continue
+                    if not _r[3]:
+                        _filtradas.append((str(_e), "calidad"))
                         continue
                     if _r[2] > MAX_MASA_EXTRAPOLADA:
                         _filtradas.append((str(_e), _r[2]))
@@ -1434,8 +1455,10 @@ def render_densidades(ticker: str):
             st.caption(
                 f"Cono anclado en {len(cone_info['anclas'])} vencimientos ({_an}). "
                 + (f"Descartados por varianza total no creciente: {', '.join(x['expiry'] for x in _ds)}. " if _ds else "")
-                + (f"Sin anclar por colas extrapoladas (mas de {MAX_MASA_EXTRAPOLADA:.2%} de la masa fuera de los strikes): "
-                   f"{', '.join(f'{e} ({m:.2%})' for e, m in cone_info.get('filtradas', []))}. " if cone_info.get("filtradas") else "")
+                + (f"Sin anclar por colas extrapoladas (mas de {MAX_MASA_EXTRAPOLADA:.2%} de la masa fuera de los strikes) "
+                   f"o por no pasar la compuerta de calidad: "
+                   f"{', '.join(f'{e} ({m:.2%})' if isinstance(m, float) else f'{e} (calidad)' for e, m in cone_info.get('filtradas', []))}. "
+                   if cone_info.get("filtradas") else "")
                 + "Entre anclas, varianza total lineal en el tiempo y funciones cuantil interpoladas."
             )
         else:

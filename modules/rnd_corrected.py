@@ -92,14 +92,41 @@ def _otm_smile(chain: pd.DataFrame, forward: float):
     # (Tradier, tastytrade) "C"/"P". Comparar contra "put" dejaba la cadena en vivo sin
     # un solo OTM y caia en silencio al promedio de todas las IV.
     t = c["option_type"].astype(str).str.strip().str.lower().str[0]
-    otm = pd.concat([
-        c[(t == "p") & (c["strike"] < forward)],
-        c[(t == "c") & (c["strike"] >= forward)],
-    ])
+    puts = c[(t == "p") & (c["strike"] < forward)]
+    calls = c[(t == "c") & (c["strike"] >= forward)]
+    # Alas sin mercado (regla de la metodologia del VIX de Cboe): desde el dinero hacia
+    # cada ala solo cuentan opciones con bid > 0, y el ala se corta en el segundo strike
+    # consecutivo sin bid. Sin esto, la IV calculada sobre un mid de 0.005 entra a la
+    # sonrisa: SPY 15 ene 2027 (Tradier, 17 nov 2026) lista strikes de 50 a 1480, con 69
+    # OTM sin bid e IV de 84% a 115%; el SVI duplicaba la IV ATM (34% contra 17%) y la
+    # densidad salia con martingala de +208 pb y asimetria de +20. Las cadenas congeladas
+    # del backtest no traen bid: ahi no cambia nada.
+    if "bid" in c.columns and pd.to_numeric(c["bid"], errors="coerce").notna().any():
+        puts = _con_mercado(puts, hacia_arriba=False)
+        calls = _con_mercado(calls, hacia_arriba=True)
+    otm = pd.concat([puts, calls])
     if otm.empty:  # fall back to whatever iv exists
         otm = c
     g = otm.groupby("strike", as_index=False)["iv"].mean().sort_values("strike")
     return g["strike"].to_numpy(dtype=float), g["iv"].to_numpy(dtype=float)
+
+
+def _con_mercado(ala: pd.DataFrame, hacia_arriba: bool) -> pd.DataFrame:
+    """Strikes de un ala con bid > 0, recorridos desde el dinero; corta en dos bid = 0 seguidos."""
+    if ala.empty:
+        return ala
+    bid = pd.to_numeric(ala["bid"], errors="coerce").fillna(0.0)
+    por_strike = bid.groupby(ala["strike"]).max().sort_index(ascending=hacia_arriba)
+    validos, ceros = [], 0
+    for k, b in por_strike.items():
+        if b > 0:
+            validos.append(k)
+            ceros = 0
+        else:
+            ceros += 1
+            if ceros >= 2:
+                break
+    return ala[ala["strike"].isin(validos) & (bid > 0)]
 
 
 def corrected_density(chain, spot, valuation_date, expiry_date, r_annual=0.045,
@@ -243,3 +270,39 @@ def corrected_rnd_quad(*args, **kwargs):
 # corrected variants are exposed so the report can present the SVI/flat-wing
 # trade-off side by side rather than forcing a single winner.
 CORRECTED = {"corrected": corrected_rnd, "corrected_quad": corrected_rnd_quad}
+
+
+# Compuerta de calidad de la densidad en vivo (2026-11-17). La martingala sola no basta: en AAPL el SVI
+# contaminado por alas sin mercado daba IV ATM de 42% contra 24% cotizada con martingala en cero. Se exige
+# ademas que la sonrisa ajustada reproduzca la IV del strike mas cercano al forward.
+MAX_MARTINGALA_BP = 25.0
+MAX_BRECHA_ATM = 0.03
+
+
+def atm_iv_observada(chain: pd.DataFrame, forward: float) -> float | None:
+    """IV cotizada (promedio de call y put) en el strike mas cercano al forward."""
+    c = chain.dropna(subset=["iv"])
+    c = c[c["iv"] > 0]
+    if c.empty:
+        return None
+    k = c.loc[(c["strike"] - forward).abs().idxmin(), "strike"]
+    v = float(c.loc[c["strike"] == k, "iv"].mean())
+    return v if np.isfinite(v) else None
+
+
+def calidad(chain: pd.DataFrame, info: dict, max_mart_bp: float = MAX_MARTINGALA_BP,
+            max_brecha: float = MAX_BRECHA_ATM) -> dict:
+    """
+    {"ok", "motivos", "atm_iv_observada", "brecha_atm"} para una densidad de `corrected_density`.
+    Motivos: "martingala" (media contra forward fuera de +-max_mart_bp) y "sonrisa" (la IV ATM del ajuste
+    se aleja mas de max_brecha de la cotizada). No corrige nada: la densidad se marca, no se esconde.
+    """
+    motivos = []
+    mart = info.get("mean_vs_forward_bp")
+    if mart is None or not np.isfinite(mart) or abs(mart) > max_mart_bp:
+        motivos.append("martingala")
+    obs = atm_iv_observada(chain, float(info.get("forward") or 0.0))
+    brecha = (float(info["atm_iv"]) - obs) if obs is not None and info.get("atm_iv") else None
+    if brecha is not None and abs(brecha) > max_brecha:
+        motivos.append("sonrisa")
+    return {"ok": not motivos, "motivos": motivos, "atm_iv_observada": obs, "brecha_atm": brecha}
