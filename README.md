@@ -81,7 +81,7 @@ The `.env.example` documents every env var (data-provider keys, tastytrade OAuth
 ## Author
 
 **Leonardo Romero, PhD** — Quantitative Researcher & Senior Financial Analyst. [leoromero.dev](https://leoromero.dev)
-[leoromero.dev](https://leoromero.dev) · [LinkedIn](https://linkedin.com/in/leonardo-suarez-romero)
+[leoromero.dev](https://leoromero.dev) · [LinkedIn](https://linkedin.com/in/leonardo-romero-phd)
 
 ## License & Copyright
 
